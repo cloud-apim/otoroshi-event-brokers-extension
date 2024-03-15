@@ -12,7 +12,7 @@ lazy val root = (project in file("."))
     assembly / test  := {},
     assembly / assemblyJarName := "otoroshi-extension-event-brokers-assembly_2.12-dev.jar",
     libraryDependencies ++= Seq(
-      "fr.maif" %% "otoroshi" % "16.15.1" % "provided",
+      "fr.maif" %% "otoroshi" % "16.15.3" % "provided",
       munit % Test
     )
   )
