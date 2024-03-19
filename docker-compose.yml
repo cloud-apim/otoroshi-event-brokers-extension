@@ -1,0 +1,76 @@
+# version: '3'
+#
+# services:
+#   zookeeper:
+#     image: wurstmeister/zookeeper
+#     container_name: zookeeper
+#     ports:
+#       - "2181:2181"
+#     environment:
+#       ZOO_MY_ID: 1
+#   kafka:
+#     image: wurstmeister/kafka
+#     container_name: kafka
+#     ports:
+#       - "9092:9092"
+#     environment:
+#       KAFKA_ADVERTISED_HOST_NAME: 192.168.0.1
+#       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+#   kafka_manager:
+#     image: kafkamanager/kafka-manager
+#     container_name: kafka-manager
+#     restart: always
+#     ports:
+#       - "8000:8000"
+#     environment:
+#       ZK_HOSTS: "zookeeper:2181"
+#       APPLICATION_SECRET: "random-secret"
+
+version: "3.7"
+services:
+  rabbitmq:
+    image: rabbitmq:3
+    container_name: rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+  kafka_manager:
+    image: kafkamanager/kafka-manager
+    container_name: kafka-manager
+    restart: always
+    ports:
+      - "8000:9000"
+    environment:
+      ZK_HOSTS: "zookeeper:2181"
+      APPLICATION_SECRET: "random-secret"
+    depends_on:
+      - zookeeper
+  zookeeper:
+    restart: always
+    image: docker.io/bitnami/zookeeper:3.8
+    ports:
+      - "2181:2181"
+    volumes:
+      - "zookeeper-volume:/bitnami"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+  kafka:
+    restart: always
+    image: docker.io/bitnami/kafka:3.3
+    ports:
+      - "9093:9093"
+    volumes:
+      - "kafka-volume:/bitnami"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://localhost:9093
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+    depends_on:
+      - zookeeper
+volumes:
+  kafka-volume:
+  zookeeper-volume:
