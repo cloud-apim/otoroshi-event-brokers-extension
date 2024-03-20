@@ -64,7 +64,7 @@ case class EventBrokerConnection(
         case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
         case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
         case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
-        case _ => new RabbitMqBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
       }
     })
   }
