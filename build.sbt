@@ -18,6 +18,7 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       "fr.maif" %% "otoroshi" % "16.15.3" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
+      "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.0",
       munit % Test
     )
   )

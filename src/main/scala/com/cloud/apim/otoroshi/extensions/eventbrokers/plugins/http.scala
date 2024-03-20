@@ -66,7 +66,7 @@ class HttpEventsIngester extends NgBackendCall {
 
   override def start(env: Env): Future[Unit] = {
     env.adminExtensions.extension[EventBrokersExtension].foreach { ext =>
-      ext.logger.info("the 'HTTP POST events ingester' plugin is available !")
+      ext.logger.info("the 'HTTP events ingester' plugin is available !")
     }
     ().vfuture
   }
@@ -90,6 +90,80 @@ class HttpEventsIngester extends NgBackendCall {
           } else {
             Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.BadRequest(Json.obj("error" -> "bad_request", "error_description" -> "no body provided")))).vfuture
           }
+        }
+      }
+    }
+  }
+}
+
+case class HttpEventsConsumerConfig(ref: String) extends NgPluginConfig {
+  def json: JsValue = HttpEventsConsumerConfig.format.writes(this)
+}
+
+object HttpEventsConsumerConfig {
+  val default = HttpEventsConsumerConfig("")
+  val format = new Format[HttpEventsConsumerConfig] {
+    override def reads(json: JsValue): JsResult[HttpEventsConsumerConfig] = Try {
+      HttpEventsConsumerConfig(
+        ref = json.select("ref").asOpt[String].getOrElse(""),
+      )
+    } match {
+      case Failure(e) => JsError(e.getMessage)
+      case Success(e) => JsSuccess(e)
+    }
+    override def writes(o: HttpEventsConsumerConfig): JsValue = Json.obj(
+      "ref" -> o.ref,
+    )
+  }
+  val configFlow: Seq[String] = Seq("ref")
+  val configSchema: Option[JsObject] = Some(Json.obj(
+    "ref" -> Json.obj(
+      "type" -> "select",
+      "label" -> s"Event Broker Connection",
+      "props" -> Json.obj(
+        "optionsFrom" -> s"/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections",
+        "optionsTransformer" -> Json.obj(
+          "label" -> "name",
+          "value" -> "id",
+        ),
+      ),
+    )
+  ))
+}
+
+class HttpEventsConsumer extends NgBackendCall {
+
+  override def name: String = "Cloud APIM - HTTP events consumer"
+  override def description: Option[String] = "Can consume events from an event broker".some
+  override def core: Boolean = false
+  override def visibility: NgPluginVisibility = NgPluginVisibility.NgUserLand
+  override def categories: Seq[NgPluginCategory] = Seq(NgPluginCategory.Custom("Cloud APIM"), NgPluginCategory.Custom("Event Brokerss"))
+
+  override def steps: Seq[NgStep] = Seq(NgStep.CallBackend)
+  override def defaultConfigObject: Option[NgPluginConfig] = Some(HttpEventsConsumerConfig.default)
+  override def noJsForm: Boolean = true
+  override def configFlow: Seq[String] = HttpEventsConsumerConfig.configFlow
+  override def configSchema: Option[JsObject] = HttpEventsConsumerConfig.configSchema
+
+  override def useDelegates: Boolean = false
+
+  override def start(env: Env): Future[Unit] = {
+    env.adminExtensions.extension[EventBrokersExtension].foreach { ext =>
+      ext.logger.info("the 'HTTP events consumer' plugin is available !")
+    }
+    ().vfuture
+  }
+
+  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
+    val config = ctx.cachedConfig(internalName)(HttpEventsConsumerConfig.format).getOrElse(HttpEventsConsumerConfig.default)
+    env.adminExtensions.extension[EventBrokersExtension] match {
+      case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
+      case Some(extension) => extension.states.connection(config.ref) match {
+        case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
+        case Some(connection) => {
+          val client = connection.client(extension)
+          val source = client.consume(JsObject(ctx.request.uri.query().toMap.mapValues(_.json))).map(w => w.data)
+          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-nd-event")), None)).vfuture
         }
       }
     }

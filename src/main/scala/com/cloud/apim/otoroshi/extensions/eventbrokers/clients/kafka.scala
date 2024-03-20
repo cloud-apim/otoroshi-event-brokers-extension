@@ -25,7 +25,7 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
 
   println("new KafkaBrokerClient")
 
-  val kconfig = KafkaConfig(
+  val kconfig = KafkaConfig.format.reads(config.settings).getOrElse(KafkaConfig(
     servers = Seq("127.0.0.1:9093"),
     keyPass = None,
     keystore = None,
@@ -36,7 +36,7 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
     mtlsConfig = MtlsConfig(),
     securityProtocol = SecurityProtocol.PLAINTEXT.name,
     saslConfig = None
-  )
+  ))
 
   implicit val ec = env.analyticsExecutionContext
 

@@ -19,9 +19,11 @@ class RabbitMqBrokerClient(config: EventBrokerConnection, extension: EventBroker
   println("new RabbitMqClient")
 
   val factory = new ConnectionFactory()
-  factory.setHost("localhost")
-  factory.setPort(5672)
-  factory.setVirtualHost("/")
+  factory.setHost(config.settings.select("host").asOpt[String].getOrElse("localhost"))
+  factory.setPort(config.settings.select("port").asOpt[Int].getOrElse(5672))
+  factory.setVirtualHost(config.settings.select("virtual_host").asOpt[String].getOrElse("/"))
+  config.settings.select("username").asOpt[String].foreach(v => factory.setUsername(v))
+  config.settings.select("password").asOpt[String].foreach(v => factory.setPassword(v))
   val connection = factory.newConnection()
   val channel = connection.createChannel()
 
