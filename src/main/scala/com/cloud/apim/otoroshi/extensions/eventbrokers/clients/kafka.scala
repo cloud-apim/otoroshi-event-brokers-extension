@@ -18,6 +18,7 @@ import otoroshi.utils.syntax.implicits._
 import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json.{JsObject, JsValue}
 
+import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
@@ -93,7 +94,8 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
   override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
     val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
     val subscription = Subscriptions.topics(topic)
-    val consumer = Consumer.plainSource(consumerSettings.withGroupId("foo"), subscription)
+    val groupId = opts.select("group_id").asOpt[String].orElse(config.settings.select("group_id").asOpt[String]).getOrElse(UUID.randomUUID().toString)
+    val consumer = Consumer.plainSource(consumerSettings.withGroupId(groupId), subscription)
     consumer.map { rec =>
       EventWrapper(
         Option(rec.key()).map(v => ByteString(v).utf8String),

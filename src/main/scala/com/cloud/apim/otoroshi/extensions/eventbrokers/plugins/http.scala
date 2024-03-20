@@ -2,6 +2,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import akka.stream.Materializer
 import akka.util.ByteString
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -13,6 +14,7 @@ import play.api.mvc.Results
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
+/*
 case class HttpEventsIngesterConfig(ref: String) extends NgPluginConfig {
   def json: JsValue = HttpEventsIngesterConfig.format.writes(this)
 }
@@ -46,7 +48,7 @@ object HttpEventsIngesterConfig {
       ),
     )
   ))
-}
+}*/
 
 class HttpEventsIngester extends NgBackendCall {
 
@@ -54,13 +56,13 @@ class HttpEventsIngester extends NgBackendCall {
   override def description: Option[String] = "Can ingest events and send them to an event broker".some
   override def core: Boolean = false
   override def visibility: NgPluginVisibility = NgPluginVisibility.NgUserLand
-  override def categories: Seq[NgPluginCategory] = Seq(NgPluginCategory.Custom("Cloud APIM"), NgPluginCategory.Custom("Event Brokerss"))
+  override def categories: Seq[NgPluginCategory] = Seq(NgPluginCategory.Custom("Cloud APIM"), NgPluginCategory.Custom("Event Brokers"))
 
   override def steps: Seq[NgStep] = Seq(NgStep.CallBackend)
-  override def defaultConfigObject: Option[NgPluginConfig] = Some(HttpEventsIngesterConfig.default)
+  override def defaultConfigObject: Option[NgPluginConfig] = Some(EventBrokerPluginConfig.default)
   override def noJsForm: Boolean = true
-  override def configFlow: Seq[String] = HttpEventsIngesterConfig.configFlow
-  override def configSchema: Option[JsObject] = HttpEventsIngesterConfig.configSchema
+  override def configFlow: Seq[String] = EventBrokerPluginConfig.configFlow
+  override def configSchema: Option[JsObject] = EventBrokerPluginConfig.configSchema
 
   override def useDelegates: Boolean = false
 
@@ -72,7 +74,7 @@ class HttpEventsIngester extends NgBackendCall {
   }
 
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
-    val config = ctx.cachedConfig(internalName)(HttpEventsIngesterConfig.format).getOrElse(HttpEventsIngesterConfig.default)
+    val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
       case Some(extension) => extension.states.connection(config.ref) match {
@@ -81,7 +83,7 @@ class HttpEventsIngester extends NgBackendCall {
           if (ctx.request.hasBody) {
             ctx.request.body.runFold(ByteString.empty)(_ ++ _).flatMap { bodyRaw =>
               val client = connection.client(extension)
-              client.publish(bodyRaw, JsObject(ctx.request.uri.query().toMap.mapValues(_.json))).map {
+              client.publish(bodyRaw, PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)).map {
                 case Left(err) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.InternalServerError(Json.obj("error" -> "publish_error", "error_details" -> err))), None))
                 case Right(Some(details)) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true, "details" -> details))), None))
                 case Right(None) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true))), None))
@@ -96,6 +98,7 @@ class HttpEventsIngester extends NgBackendCall {
   }
 }
 
+/*
 case class HttpEventsConsumerConfig(ref: String) extends NgPluginConfig {
   def json: JsValue = HttpEventsConsumerConfig.format.writes(this)
 }
@@ -129,7 +132,7 @@ object HttpEventsConsumerConfig {
       ),
     )
   ))
-}
+}*/
 
 class HttpEventsConsumer extends NgBackendCall {
 
@@ -137,13 +140,13 @@ class HttpEventsConsumer extends NgBackendCall {
   override def description: Option[String] = "Can consume events from an event broker".some
   override def core: Boolean = false
   override def visibility: NgPluginVisibility = NgPluginVisibility.NgUserLand
-  override def categories: Seq[NgPluginCategory] = Seq(NgPluginCategory.Custom("Cloud APIM"), NgPluginCategory.Custom("Event Brokerss"))
+  override def categories: Seq[NgPluginCategory] = Seq(NgPluginCategory.Custom("Cloud APIM"), NgPluginCategory.Custom("Event Brokers"))
 
   override def steps: Seq[NgStep] = Seq(NgStep.CallBackend)
-  override def defaultConfigObject: Option[NgPluginConfig] = Some(HttpEventsConsumerConfig.default)
+  override def defaultConfigObject: Option[NgPluginConfig] = Some(EventBrokerPluginConfig.default)
   override def noJsForm: Boolean = true
-  override def configFlow: Seq[String] = HttpEventsConsumerConfig.configFlow
-  override def configSchema: Option[JsObject] = HttpEventsConsumerConfig.configSchema
+  override def configFlow: Seq[String] = EventBrokerPluginConfig.configFlow
+  override def configSchema: Option[JsObject] = EventBrokerPluginConfig.configSchema
 
   override def useDelegates: Boolean = false
 
@@ -155,14 +158,14 @@ class HttpEventsConsumer extends NgBackendCall {
   }
 
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
-    val config = ctx.cachedConfig(internalName)(HttpEventsConsumerConfig.format).getOrElse(HttpEventsConsumerConfig.default)
+    val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
       case Some(extension) => extension.states.connection(config.ref) match {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
           val client = connection.client(extension)
-          val source = client.consume(JsObject(ctx.request.uri.query().toMap.mapValues(_.json))).map(w => w.data)
+          val source = client.consume(PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)).map(w => w.data ++ ByteString("\n"))
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-nd-event")), None)).vfuture
         }
       }

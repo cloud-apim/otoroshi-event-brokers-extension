@@ -18,7 +18,7 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
 
   println("new MQTTBrokerClient")
 
-  val publisherId = config.settings.select("published_id").asOpt[String].getOrElse(UUID.randomUUID().toString)
+  val publisherId = config.settings.select("publisher_id").asOpt[String].getOrElse(UUID.randomUUID().toString)
   val host = config.settings.select("host").asOpt[String].getOrElse("localhost")
   val defaulttopic = config.settings.select("topic").asOpt[String].getOrElse("test")
   val port = config.settings.select("port").asOpt[Int].getOrElse(1883)
@@ -29,8 +29,8 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
   options.setAutomaticReconnect(true)
   options.setCleanSession(true)
   options.setConnectionTimeout(10)
-  config.settings.select("username").asOpt[String].foreach(v => options.setUserName(v))
-  config.settings.select("password").asOpt[String].foreach(v => options.setPassword(v.toCharArray))
+  config.settings.select("username").asOpt[String].filterNot(_.isBlank).foreach(v => options.setUserName(v))
+  config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => options.setPassword(v.toCharArray))
   client.connect(options)
 
   implicit val ec = env.otoroshiExecutionContext

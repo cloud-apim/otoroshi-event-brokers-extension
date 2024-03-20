@@ -52,31 +52,30 @@ case class EventBrokerConnection(
    kind: EventBrokerConnectionKind,
    settings: JsObject,
 ) extends EntityLocationSupport {
+
   override def internalId: String               = id
   override def json: JsValue                    = EventBrokerConnection.format.writes(this)
   override def theName: String                  = name
   override def theDescription: String           = description
   override def theTags: Seq[String]             = tags
   override def theMetadata: Map[String, String] = metadata
-  def hash: String = ???
+
+  def hash: String = s"${id}-${settings.stringify}".sha256
+
+  def newClientInstance(ext: EventBrokersExtension)(implicit env: Env, ec: ExecutionContext): EventBrokerClient = kind match {
+    case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
+    case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
+    case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
+    case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
+    case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
+  }
+
   def client(ext: EventBrokersExtension)(implicit env: Env, ec: ExecutionContext): EventBrokerClient = {
     val client = EventBrokerConnection.cache.getOrElseUpdate(id, {
-      kind match {
-        case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
-      }
+      newClientInstance(ext)
     })
     if (client.hash != hash) {
-      val newClient = kind match {
-        case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
-        case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
-      }
+      val newClient = newClientInstance(ext)
       EventBrokerConnection.cache.put(id, newClient)
       client.close()
       newClient

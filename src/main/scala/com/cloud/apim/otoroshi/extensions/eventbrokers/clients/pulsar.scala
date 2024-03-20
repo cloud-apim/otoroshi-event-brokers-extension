@@ -6,8 +6,9 @@ import akka.stream.scaladsl.Source
 import akka.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
-import com.sksamuel.pulsar4s.{ConsumerConfig, MessageId, ProducerConfig, PulsarClient, Subscription, Topic, Consumer => PulsarConsumer, Producer => PulsarProducer}
-import org.apache.pulsar.client.api.Schema
+import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultPulsarClient, MessageId, ProducerConfig, PulsarClient, PulsarClientConfig, Subscription, Topic, Consumer => PulsarConsumer, Producer => PulsarProducer}
+import org.apache.pulsar.client.api.{Authentication, Schema}
+import org.apache.pulsar.client.impl.auth.{AuthenticationBasic, AuthenticationDataBasic, AuthenticationDataToken, AuthenticationDisabled, AuthenticationToken}
 import org.apache.pulsar.client.impl.schema.SchemaInfoImpl
 import org.apache.pulsar.common.schema.{SchemaInfo, SchemaType}
 import otoroshi.env.Env
@@ -31,6 +32,39 @@ object PulsarBroker {
         .`type`(SchemaType.BYTES)
         .schema(Array.empty[Byte])
         .build()
+    }
+  }
+
+  def client(_env: otoroshi.env.Env, config: PulsarConfig, rawConfig: JsObject): PulsarClient = {
+    if (config.mtlsConfig.mtls) {
+      val (_, jks, password) = config.mtlsConfig.toJKS(_env)
+      val builder = org.apache.pulsar.client.api.PulsarClient
+        .builder()
+        .serviceUrl(config.uri)
+        .enableTlsHostnameVerification(false)
+        .allowTlsInsecureConnection(config.mtlsConfig.trustAll)
+        .tlsTrustStoreType("JKS")
+        .tlsTrustStorePassword(password)
+        .tlsTrustCertsFilePath(jks.getAbsolutePath)
+        .useKeyStoreTls(true)
+      config.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
+      new DefaultPulsarClient(builder.build())
+    } else {
+      val authOpt: Option[Authentication] = rawConfig.select("auth").asOpt[JsObject].map { obj =>
+        obj.select("kind").asOpt[String].getOrElse("disabled").toLowerCase() match {
+          case "basic" => new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(
+            obj.select("username").as[String],
+            obj.select("password").as[String],
+          ).getCommandData))
+          case "token" => new AuthenticationToken().seffectOn(_.configure(new AuthenticationDataToken(() => obj.select("token").as[String]).getCommandData))
+          case _ => new AuthenticationDisabled()
+        }
+      }
+      val c = PulsarClientConfig(
+        serviceUrl = config.uri,
+        authentication = authOpt,
+      )
+      PulsarClient(c)
     }
   }
 
