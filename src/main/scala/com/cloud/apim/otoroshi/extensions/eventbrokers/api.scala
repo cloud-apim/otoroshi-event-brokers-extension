@@ -2,6 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import otoroshi.env.Env
 import play.api.libs.json.{JsObject, JsValue}
 import otoroshi.utils.syntax.implicits._
@@ -19,4 +20,6 @@ trait EventBrokerClient {
   def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
   def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _]
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit]
+  def hash: String = config.hash
+  def config: EventBrokerConnection
 }

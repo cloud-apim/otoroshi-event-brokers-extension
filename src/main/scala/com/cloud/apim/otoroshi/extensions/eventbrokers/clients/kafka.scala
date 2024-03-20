@@ -21,7 +21,7 @@ import play.api.libs.json.{JsObject, JsValue}
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
-class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   println("new KafkaBrokerClient")
 

@@ -47,7 +47,7 @@ object PulsarBroker {
   }
 }
 
-class PulsarBrokerClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   println("new PulsarBrokerClient")
 

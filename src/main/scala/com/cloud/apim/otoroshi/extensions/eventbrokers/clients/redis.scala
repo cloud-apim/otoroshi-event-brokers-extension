@@ -16,7 +16,7 @@ import reactor.core.publisher.Flux
 
 import scala.concurrent.{ExecutionContext, Future}
 
-class RedisBrokerClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   println("new RedisBrokerClient")
 

@@ -13,6 +13,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBr
 import play.api.libs.json._
 
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Success, Try}
 
 sealed trait EventBrokerConnectionKind {
@@ -57,9 +58,10 @@ case class EventBrokerConnection(
   override def theDescription: String           = description
   override def theTags: Seq[String]             = tags
   override def theMetadata: Map[String, String] = metadata
-  def client(ext: EventBrokersExtension)(implicit env: Env): EventBrokerClient = {
-    EventBrokerConnection.cache.getOrElseUpdate(id, {
-      kind.debugPrintln match {
+  def hash: String = ???
+  def client(ext: EventBrokersExtension)(implicit env: Env, ec: ExecutionContext): EventBrokerClient = {
+    val client = EventBrokerConnection.cache.getOrElseUpdate(id, {
+      kind match {
         case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
         case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
         case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
@@ -67,6 +69,20 @@ case class EventBrokerConnection(
         case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
       }
     })
+    if (client.hash != hash) {
+      val newClient = kind match {
+        case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
+      }
+      EventBrokerConnection.cache.put(id, newClient)
+      client.close()
+      newClient
+    } else {
+      client
+    }
   }
 }
 

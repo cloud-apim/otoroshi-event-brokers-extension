@@ -14,7 +14,7 @@ import reactor.core.publisher.Sinks
 import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future}
 
-class MQTTBrokerClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   println("new MQTTBrokerClient")
 
