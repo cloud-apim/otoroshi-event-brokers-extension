@@ -2,37 +2,53 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
-import com.rabbitmq.client.{CancelCallback, ConnectionFactory, ConsumerShutdownSignalCallback, DeliverCallback, Delivery, ShutdownSignalException}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
+import com.rabbitmq.client._
 import otoroshi.env.Env
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.extensions.eventbrokers.EventBrokersExtension
-import play.api.libs.json.JsValue
+import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
+import play.api.libs.json.{JsObject, JsValue}
 import reactor.core.publisher.Sinks
 
+import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future}
 
-class RabbitMqClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class RabbitMqBrokerClient(config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   println("new RabbitMqClient")
 
-  val queueName = "testing"
   val factory = new ConnectionFactory()
   factory.setHost("localhost")
   factory.setPort(5672)
   factory.setVirtualHost("/")
   val connection = factory.newConnection()
   val channel = connection.createChannel()
-  channel.queueDeclare(queueName, false, false, false, null);
 
-  override def publish(event: ByteString)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
+    channel.close()
+    connection.close()
+    ().vfuture
+  }
+
+  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     // println(s"publish to '${queueName}' - ${event.utf8String}")
-    channel.basicPublish("", queueName, null, event.toArray)
+    val queueName = opts.select("queue").asOpt[String]
+      .orElse(config.settings.select("queue").asOpt[String])
+      .getOrElse("testing")
+    val routingKey = opts.select("routing_key").asOpt[String]
+      .orElse(config.settings.select("routing_key").asOpt[String])
+    if (env.isDev) {
+      channel.queueDeclare(queueName, false, false, false, null)
+    }
+    routingKey match {
+      case Some(routingKey) => channel.basicPublish(queueName, routingKey, null, event.toArray)
+      case None => channel.basicPublish("", queueName, null, event.toArray)
+    }
     Right(None).vfuture
   }
 
-  override def consume()(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
     val hotSource = Sinks.many().unicast().onBackpressureBuffer[EventWrapper]()
     val hotFlux   = hotSource.asFlux()
     val cb = new DeliverCallback() {
@@ -52,7 +68,24 @@ class RabbitMqClient(config: EventBrokerConnection, extension: EventBrokersExten
         hotSource.tryEmitComplete()
       }
     }
-    channel.basicConsume(queueName, true, cb, cancelCb, shutdownCb)
+    // TODO: handle cancel, shutdown, end of stream, etc
+    val queueName = opts.select("queue").asOpt[String]
+      .orElse(config.settings.select("queue").asOpt[String])
+      .getOrElse("testing")
+    val routingKey = opts.select("routing_key").asOpt[String]
+      .orElse(config.settings.select("routing_key").asOpt[String])
+    if (env.isDev) {
+      channel.queueDeclare(queueName, false, false, false, null)
+    }
+    routingKey match {
+      case Some(routingKey) => {
+        val tmpQueue = channel.queueDeclare(s"tmp-consumption-queue-${UUID.randomUUID().toString}", false, true, true, null)
+        val tmpQueueName = tmpQueue.getQueue
+        channel.queueBind(tmpQueueName, queueName, routingKey)
+        channel.basicConsume(tmpQueueName, true, cb, cancelCb, shutdownCb)
+      }
+      case None => channel.basicConsume(queueName, true, cb, cancelCb, shutdownCb)
+    }
     Source.fromPublisher(hotFlux)
   }
 }

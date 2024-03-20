@@ -1,4 +1,4 @@
-package otoroshi_plugins.com.cloud.apim.extensions.eventbrokers
+package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import akka.stream.scaladsl.StreamConverters
 import akka.util.ByteString

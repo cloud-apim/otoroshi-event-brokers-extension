@@ -5,6 +5,10 @@ ThisBuild / version          := "1.0.0-dev"
 ThisBuild / organization     := "com.cloud-apim"
 ThisBuild / organizationName := "Cloud-APIM"
 
+lazy val excludesSlf4j = Seq(
+  ExclusionRule(organization = "org.slf4j"),
+)
+
 lazy val root = (project in file("."))
   .settings(
     name := "otoroshi-extension-event-brokers",
@@ -13,7 +17,7 @@ lazy val root = (project in file("."))
     assembly / assemblyJarName := "otoroshi-extension-event-brokers-assembly_2.12-dev.jar",
     libraryDependencies ++= Seq(
       "fr.maif" %% "otoroshi" % "16.15.3" % "provided",
-      "com.rabbitmq" % "amqp-client" % "5.20.0",
+      "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       munit % Test
     )
   )

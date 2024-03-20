@@ -5,7 +5,7 @@ import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.extensions.eventbrokers.EventBrokersExtension
+import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json._
 import play.api.mvc.Results
 
@@ -71,14 +71,14 @@ class SseEventConsumer extends NgBackendCall {
   }
 
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
-    val config = ctx.cachedConfig(internalName)(PostEventIngesterConfig.format).getOrElse(PostEventIngesterConfig.default)
+    val config = ctx.cachedConfig(internalName)(SseEventConsumerConfig.format).getOrElse(SseEventConsumerConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
       case Some(extension) => extension.states.connection(config.ref) match {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
           val client = connection.client(extension)
-          val source = client.consume().map(w => w.serialize)
+          val source = client.consume(JsObject(ctx.request.uri.query().toMap.mapValues(_.json))).map(w => w.serialize)
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-streams")), None)).vfuture
         }
       }

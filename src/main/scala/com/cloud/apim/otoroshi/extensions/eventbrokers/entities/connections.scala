@@ -9,7 +9,7 @@ import otoroshi.next.extensions._
 import otoroshi.security.IdGenerator
 import otoroshi.storage._
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.extensions.eventbrokers._
+import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokersExtension, EventBrokersExtensionDatastores, EventBrokersExtensionState}
 import play.api.libs.json._
 
 import scala.collection.concurrent.TrieMap
@@ -23,9 +23,15 @@ sealed trait EventBrokerConnectionKind {
 object EventBrokerConnectionKind {
   case object Kafka extends EventBrokerConnectionKind { def name: String = "kafka" }
   case object RabbitMQ extends EventBrokerConnectionKind { def name: String = "rabbitmq" }
+  case object Pulsar extends EventBrokerConnectionKind { def name: String = "pulsar" }
+  case object Redis extends EventBrokerConnectionKind { def name: String = "redis" }
+  case object MQTT extends EventBrokerConnectionKind { def name: String = "mqtt" }
   def apply(str: String): Option[EventBrokerConnectionKind] = str.toLowerCase match {
     case "kafka" => Kafka.some
     case "rabbitmq" => RabbitMQ.some
+    case "pulsar" => Pulsar.some
+    case "redis" => Redis.some
+    case "mqtt" => MQTT.some
     case _ => None
   }
 }
@@ -55,7 +61,10 @@ case class EventBrokerConnection(
     EventBrokerConnection.cache.getOrElseUpdate(id, {
       kind.debugPrintln match {
         case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
-        case _ => new RabbitMqClient(this, ext, env)
+        case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
+        case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
+        case _ => new RabbitMqBrokerClient(this, ext, env)
       }
     })
   }

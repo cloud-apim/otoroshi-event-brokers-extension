@@ -5,20 +5,18 @@ import akka.kafka.scaladsl.Consumer
 import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
-import com.rabbitmq.client.{CancelCallback, ConnectionFactory, ConsumerShutdownSignalCallback, DeliverCallback, Delivery, ShutdownSignalException}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.security.auth.SecurityProtocol
-import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer, StringSerializer}
+import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import otoroshi.env.Env
+import otoroshi.events.KafkaConfig
 import otoroshi.events.KafkaSettings.kafkaSettings
-import otoroshi.events.{KafkaConfig, KafkaEventProducer, KafkaSettings, SaslConfig}
 import otoroshi.utils.http.MtlsConfig
-import otoroshi.utils.syntax.implicits.BetterSyntax
-import otoroshi_plugins.com.cloud.apim.extensions.eventbrokers.EventBrokersExtension
-import play.api.libs.json.{JsValue, Json}
-import reactor.core.publisher.Sinks
+import otoroshi.utils.syntax.implicits._
+import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
+import play.api.libs.json.{JsObject, JsValue}
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
@@ -44,8 +42,6 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
 
   lazy val logger = play.api.Logger("KafkaBrokerClient")
 
-  lazy val topic = kconfig.topic
-
   private lazy val producerSettings = ProducerSettings
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
     .withProperties(kafkaSettings(env, kconfig))
@@ -58,10 +54,9 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
 
   private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer
 
-
-  def ppublish(event: ByteString): Future[Done] = {
-    println("kafka publish")
+  def ppublish(event: ByteString, opts: JsObject): Future[Done] = {
     val promise = Promise[RecordMetadata]
+    val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
     try {
       producer.send(new ProducerRecord[Array[Byte], Array[Byte]](topic, event.toArray), callback(promise))
     } catch {
@@ -73,8 +68,9 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
     }
   }
 
-  def close() = {
+  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
     producer.close()
+    ().vfuture
   }
 
   private def callback(promise: Promise[RecordMetadata]) =
@@ -88,14 +84,14 @@ class KafkaBrokerClient(config: EventBrokerConnection, extension: EventBrokersEx
 
     }
 
-  override def publish(event: ByteString)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    ppublish(event).map { _ =>
+  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+    ppublish(event, opts).map { _ =>
       Right(None)
     }
   }
 
-  override def consume()(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
-    println("kafka consume")
+  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+    val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
     val subscription = Subscriptions.topics(topic)
     val consumer = Consumer.plainSource(consumerSettings.withGroupId("foo"), subscription)
     consumer.map { rec =>
