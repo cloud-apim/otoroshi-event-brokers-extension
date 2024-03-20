@@ -24,6 +24,9 @@ class EventBrokerConnectionsPage extends Component {
       props: { label: 'Description', possibleValues: [
           { 'label': 'RabbitMQ', value: 'rabbitmq' },
           { 'label': 'Kafka', value: 'kafka' },
+          { 'label': 'Pulsar', value: 'pulsar' },
+          { 'label': 'MQTT', value: 'mqtt' },
+          { 'label': 'Redis Pub/Sub', value: 'redis' },
         ] }
     },
     'settings': {
