@@ -83,11 +83,6 @@ object PulsarBroker {
 
 class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
-  println("new PulsarBrokerClient")
-
-  implicit val ec = env.otoroshiExecutionContext
-
-  private val logger = play.api.Logger("RabbitMqBrokerClient")
   private val pconfig = PulsarConfig.format.reads(config.settings).getOrElse(PulsarConfig( // TODO: handle auth !!!!!
     uri = "pulsar://localhost:6650",
     tlsTrustCertsFilePath = None,

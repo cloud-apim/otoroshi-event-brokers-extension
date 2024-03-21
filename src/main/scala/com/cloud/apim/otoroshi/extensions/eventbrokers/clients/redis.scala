@@ -18,8 +18,6 @@ import scala.concurrent.{ExecutionContext, Future}
 
 class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
-  println("new RedisBrokerClient")
-
   lazy val startTLS               = config.settings.select("start_tls").asOpt[Boolean].getOrElse(false)
   lazy val verifyPeers            = config.settings.select("verify_peers").asOpt[Boolean].getOrElse(true)
   lazy val nodesRaw               = config.settings.select("uris").asOpt[Seq[String]].toSeq.flatten.map { v =>
@@ -40,9 +38,7 @@ class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBroke
   }
   val client = RedisClient.create(resources, nodesRaw.head)
   val connection = client.connectPubSub(new ByteStringRedisCodec()).reactive()
-
-  lazy val logger = play.api.Logger("RedisBrokerClient")
-
+  
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
     client.close()
     ().vfuture

@@ -16,8 +16,6 @@ import scala.concurrent.{ExecutionContext, Future}
 
 class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
-  println("new RabbitMqClient")
-
   val factory = new ConnectionFactory()
   factory.setHost(config.settings.select("host").asOpt[String].getOrElse("localhost"))
   factory.setPort(config.settings.select("port").asOpt[Int].getOrElse(5672))

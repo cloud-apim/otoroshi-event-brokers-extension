@@ -16,8 +16,6 @@ import scala.concurrent.{ExecutionContext, Future}
 
 class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
-  println("new MQTTBrokerClient")
-
   val publisherId = config.settings.select("publisher_id").asOpt[String].getOrElse(UUID.randomUUID().toString)
   val host = config.settings.select("host").asOpt[String].getOrElse("localhost")
   val defaulttopic = config.settings.select("topic").asOpt[String].getOrElse("test")
@@ -32,10 +30,6 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
   config.settings.select("username").asOpt[String].filterNot(_.isBlank).foreach(v => options.setUserName(v))
   config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => options.setPassword(v.toCharArray))
   client.connect(options)
-
-  implicit val ec = env.otoroshiExecutionContext
-
-  lazy val logger = play.api.Logger("MQTTBrokerClient")
 
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
     client.close()

@@ -1,6 +1,5 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import akka.Done
 import akka.kafka.scaladsl.Consumer
 import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
 import akka.stream.scaladsl.Source
@@ -9,6 +8,7 @@ import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConne
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
+import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import otoroshi.env.Env
@@ -26,8 +26,6 @@ import scala.util.control.NonFatal
 
 class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
-  println("new KafkaBrokerClient")
-
   val kconfig = KafkaConfig.format.reads(config.settings).getOrElse(KafkaConfig(
     servers = Seq("127.0.0.1:9093"),
     keyPass = None,
@@ -41,9 +39,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     saslConfig = None
   ))
 
-  implicit val ec = env.analyticsExecutionContext
-
-  lazy val logger = play.api.Logger("KafkaBrokerClient")
+  // lazy val logger = play.api.Logger("KafkaBrokerClient")
 
   private lazy val producerSettings = ProducerSettings
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
@@ -57,7 +53,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
   private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer
 
-  def ppublish(event: ByteString, opts: JsObject): Future[JsValue] = {
+  def ppublish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[JsValue] = {
     val promise = Promise[RecordMetadata]
     val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
     val key = opts.select("key").asOpt[String]
@@ -116,34 +112,54 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
   // https://doc.akka.io/docs/alpakka-kafka/2.0.7/consumer.html
   override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
-    val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
-    val subscription = Subscriptions.topics(topic)
-    val groupId = opts.select("group_id").asOpt[String].orElse(config.settings.select("group_id").asOpt[String]).getOrElse(UUID.randomUUID().toString)
+
+    import scala.jdk.CollectionConverters._
+
+    val topics = opts.select("topics").asOpt[String].map(_.split(",").map(_.trim).toSeq).getOrElse(Seq.empty) ++ Seq(opts.select("topic").asOpt[String].getOrElse(kconfig.topic)).flatMap(_.split(",").map(_.trim))
+    val offsetFromOpt = opts.select("offset_from").asOpt[String].orElse(config.settings.select("offset_from").asOpt[String]).map(_.toLong)
+    val offsetToOpt = opts.select("offset_to").asOpt[String].orElse(config.settings.select("offset_to").asOpt[String]).map(_.toLong)
+    val groupIdOpt = opts.select("group_id").asOpt[String].orElse(config.settings.select("group_id").asOpt[String]).getOrElse(UUID.randomUUID().toString).some
     val partitionOpt = opts.select("partition").asOpt[String].orElse(config.settings.select("partition").asOpt[String]).map(_.toInt)
     val clientIdOpt = opts.select("client_id").asOpt[String].orElse(config.settings.select("client_id").asOpt[String])
     val groupInstanceIdOpt = opts.select("group_instance_id").asOpt[String].orElse(config.settings.select("group_instance_id").asOpt[String])
+    val autoOffsetResetOpt = opts.select("auto_offset_reset").asOpt[String].orElse(config.settings.select("auto_offset_reset").asOpt[String]) // earliest, latest, none
 
     val localSettings = consumerSettings
-      .withGroupId(groupId)
+      .applyOnWithOpt(groupIdOpt) { case (s, groupId) => s.withGroupId(groupId) }
       .applyOnWithOpt(clientIdOpt) { case (s, clientId) => s.withClientId(clientId) }
       .applyOnWithOpt(groupInstanceIdOpt) { case (s, groupInstanceId) => s.withGroupInstanceId(groupInstanceId) }
-      //.withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
-      // TODO: from offset
-      // TODO: to offset
-      // TODO: commit
+      .applyOnWithOpt(autoOffsetResetOpt) { case (s, autoOffsetReset) => s.withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset) }
+      .applyOnIf(groupIdOpt.isEmpty)(_.withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true"))
+      // TODO: delivery
 
-    // val consumer = Consumer.plainSource(localSettings, subscription)
-    val consumer = Consumer.plainPartitionedSource(localSettings, subscription)
-      .filter {
-        case (topicPartition, _) if partitionOpt.isEmpty => true
+    val consumerRaw = offsetFromOpt match {
+      case None => Consumer.plainPartitionedSource(localSettings, Subscriptions.topics(topics.toSet.asJava))
+      case Some(offset) => Consumer.plainPartitionedManualOffsetSource(localSettings, Subscriptions.topics(topics.toSet.asJava),
+        getOffsetsOnAssign = partitions => {
+          val map: Map[TopicPartition, Long] = partitionOpt match {
+            case None => partitions.map(p => (p, offset)).toMap
+            case Some(part) => Map(new TopicPartition(topics.head, part) -> offset)
+          }
+          map.vfuture
+        },
+        onRevoke = partitions => ()
+      )
+    }
+    val consumer = consumerRaw.filter {
+        case (_, _) if partitionOpt.isEmpty => true
         case (topicPartition, _) if partitionOpt.nonEmpty => partitionOpt.contains(topicPartition.partition())
       }
       .flatMapConcat(_._2)
-    consumer.map { rec =>
-      EventWrapper(
-        Option(rec.key()).map(v => ByteString(v).utf8String),
-        ByteString(rec.value())
-      )
-    }
+    consumer
+      .takeWhile({
+        case _ if offsetToOpt.isEmpty => true
+        case r => r.offset() <= offsetToOpt.get
+      }, false)
+      .map { rec =>
+        EventWrapper(
+          Option(rec.key()).map(v => ByteString(v).utf8String),
+          ByteString(rec.value())
+        )
+      }
   }
 }

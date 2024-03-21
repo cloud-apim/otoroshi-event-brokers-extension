@@ -9,6 +9,7 @@ import otoroshi.utils.syntax.implicits._
 
 import scala.concurrent.{ExecutionContext, Future}
 
+// TODO: metedata ???
 case class EventWrapper(id: Option[String], data: ByteString) {
   def asWsMessage: play.api.http.websocket.Message = {
     play.api.http.websocket.BinaryMessage(data)
