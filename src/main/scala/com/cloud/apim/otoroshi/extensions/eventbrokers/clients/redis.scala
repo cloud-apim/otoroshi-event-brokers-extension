@@ -38,7 +38,7 @@ class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBroke
   }
   val client = RedisClient.create(resources, nodesRaw.head)
   val connection = client.connectPubSub(new ByteStringRedisCodec()).reactive()
-  
+
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
     client.close()
     ().vfuture
