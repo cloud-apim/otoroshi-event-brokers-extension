@@ -1,6 +1,7 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import akka.stream.Materializer
+import akka.stream.scaladsl.Framing
 import akka.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils}
 import otoroshi.env.Env
@@ -11,44 +12,9 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
-
-/*
-case class HttpEventsIngesterConfig(ref: String) extends NgPluginConfig {
-  def json: JsValue = HttpEventsIngesterConfig.format.writes(this)
-}
-
-object HttpEventsIngesterConfig {
-  val default = HttpEventsIngesterConfig("")
-  val format = new Format[HttpEventsIngesterConfig] {
-    override def reads(json: JsValue): JsResult[HttpEventsIngesterConfig] = Try {
-      HttpEventsIngesterConfig(
-        ref = json.select("ref").asOpt[String].getOrElse(""),
-      )
-    } match {
-      case Failure(e) => JsError(e.getMessage)
-      case Success(e) => JsSuccess(e)
-    }
-    override def writes(o: HttpEventsIngesterConfig): JsValue = Json.obj(
-      "ref" -> o.ref,
-    )
-  }
-  val configFlow: Seq[String] = Seq("ref")
-  val configSchema: Option[JsObject] = Some(Json.obj(
-    "ref" -> Json.obj(
-      "type" -> "select",
-      "label" -> s"Event Broker Connection",
-      "props" -> Json.obj(
-        "optionsFrom" -> s"/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections",
-        "optionsTransformer" -> Json.obj(
-          "label" -> "name",
-          "value" -> "id",
-        ),
-      ),
-    )
-  ))
-}*/
 
 class HttpEventsIngester extends NgBackendCall {
 
@@ -81,12 +47,31 @@ class HttpEventsIngester extends NgBackendCall {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
           if (ctx.request.hasBody) {
-            ctx.request.body.runFold(ByteString.empty)(_ ++ _).flatMap { bodyRaw =>
-              val client = connection.client(extension)
-              client.publish(bodyRaw, PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)).map {
-                case Left(err) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.InternalServerError(Json.obj("error" -> "publish_error", "error_details" -> err))), None))
-                case Right(Some(details)) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true, "details" -> details))), None))
-                case Right(None) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true))), None))
+            val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+            val isBodyStreamed = ctx.request.contentType.exists(_.startsWith("application/x-ndjson")) ||
+              ctx.request.contentType.exists(_.startsWith("application/x-nd-event")) ||
+              opts.select("body-streamed").asOpt[String].contains("true")
+            val delimiter = opts.select("delimiter").asOpt[String].getOrElse("\n")
+            val client = connection.client(extension)
+            if (isBodyStreamed) {
+              val source = ctx.request.body
+                .via(Framing.delimiter(ByteString(delimiter), 32 * 1024 * 1024))
+                .mapAsync(1) { chunk =>
+                  client.publish(chunk, opts).map {
+                    case Left(err) => Json.obj("error" -> "publish_error", "error_details" -> err)
+                    case Right(Some(details)) => Json.obj("published" -> true, "details" -> details)
+                    case Right(None) => Json.obj("published" -> true)
+                  }
+                }
+                .map(_.stringify.applyOn(str => s"$str\n").byteString)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-ndjson")), None)).vfuture
+            } else {
+              ctx.request.body.runFold(ByteString.empty)(_ ++ _).flatMap { bodyRaw =>
+                client.publish(bodyRaw, opts).map {
+                  case Left(err) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.InternalServerError(Json.obj("error" -> "publish_error", "error_details" -> err))), None))
+                  case Right(Some(details)) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true, "details" -> details))), None))
+                  case Right(None) => Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Created(Json.obj("published" -> true))), None))
+                }
               }
             }
           } else {
@@ -97,42 +82,6 @@ class HttpEventsIngester extends NgBackendCall {
     }
   }
 }
-
-/*
-case class HttpEventsConsumerConfig(ref: String) extends NgPluginConfig {
-  def json: JsValue = HttpEventsConsumerConfig.format.writes(this)
-}
-
-object HttpEventsConsumerConfig {
-  val default = HttpEventsConsumerConfig("")
-  val format = new Format[HttpEventsConsumerConfig] {
-    override def reads(json: JsValue): JsResult[HttpEventsConsumerConfig] = Try {
-      HttpEventsConsumerConfig(
-        ref = json.select("ref").asOpt[String].getOrElse(""),
-      )
-    } match {
-      case Failure(e) => JsError(e.getMessage)
-      case Success(e) => JsSuccess(e)
-    }
-    override def writes(o: HttpEventsConsumerConfig): JsValue = Json.obj(
-      "ref" -> o.ref,
-    )
-  }
-  val configFlow: Seq[String] = Seq("ref")
-  val configSchema: Option[JsObject] = Some(Json.obj(
-    "ref" -> Json.obj(
-      "type" -> "select",
-      "label" -> s"Event Broker Connection",
-      "props" -> Json.obj(
-        "optionsFrom" -> s"/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections",
-        "optionsTransformer" -> Json.obj(
-          "label" -> "name",
-          "value" -> "id",
-        ),
-      ),
-    )
-  ))
-}*/
 
 class HttpEventsConsumer extends NgBackendCall {
 
@@ -165,7 +114,11 @@ class HttpEventsConsumer extends NgBackendCall {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
           val client = connection.client(extension)
-          val source = client.consume(PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)).map(w => w.data ++ ByteString("\n"))
+          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+          val source = client.consume(opts).map(w => w.data ++ ByteString("\n"))
+            .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
+            .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
+            .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-nd-event")), None)).vfuture
         }
       }

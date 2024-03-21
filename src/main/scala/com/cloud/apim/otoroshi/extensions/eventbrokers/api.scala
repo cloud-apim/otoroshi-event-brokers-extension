@@ -10,6 +10,9 @@ import otoroshi.utils.syntax.implicits._
 import scala.concurrent.{ExecutionContext, Future}
 
 case class EventWrapper(id: Option[String], data: ByteString) {
+  def asWsMessage: play.api.http.websocket.Message = {
+    play.api.http.websocket.BinaryMessage(data)
+  }
   def serialize: ByteString = id match {
     case Some(id) => s"id: ${id}\ndata: ${data.utf8String}\n\n".byteString
     case None => s"data: ${data.utf8String}\n\n".byteString

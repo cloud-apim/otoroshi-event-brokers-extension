@@ -10,44 +10,9 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
-
-/*
-case class SseEventConsumerConfig(ref: String) extends NgPluginConfig {
-  def json: JsValue = SseEventConsumerConfig.format.writes(this)
-}
-
-object SseEventConsumerConfig {
-  val default = SseEventConsumerConfig("")
-  val format = new Format[SseEventConsumerConfig] {
-    override def reads(json: JsValue): JsResult[SseEventConsumerConfig] = Try {
-      SseEventConsumerConfig(
-        ref = json.select("ref").asOpt[String].getOrElse(""),
-      )
-    } match {
-      case Failure(e) => JsError(e.getMessage)
-      case Success(e) => JsSuccess(e)
-    }
-    override def writes(o: SseEventConsumerConfig): JsValue = Json.obj(
-      "ref" -> o.ref,
-    )
-  }
-  val configFlow: Seq[String] = Seq("ref")
-  val configSchema: Option[JsObject] = Some(Json.obj(
-    "ref" -> Json.obj(
-      "type" -> "select",
-      "label" -> s"Event Broker Connection",
-      "props" -> Json.obj(
-        "optionsFrom" -> s"/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections",
-        "optionsTransformer" -> Json.obj(
-          "label" -> "name",
-          "value" -> "id",
-        ),
-      ),
-    )
-  ))
-}*/
 
 class SseEventConsumer extends NgBackendCall {
 
@@ -80,7 +45,11 @@ class SseEventConsumer extends NgBackendCall {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
           val client = connection.client(extension)
-          val source = client.consume(PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)).map(w => w.serialize)
+          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+          val source = client.consume(opts).map(w => w.serialize)
+            .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
+            .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
+            .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-streams")), None)).vfuture
         }
       }

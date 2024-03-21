@@ -12,11 +12,10 @@ lazy val excludesSlf4j = Seq(
 lazy val root = (project in file("."))
   .settings(
     name := "otoroshi-extension-event-brokers",
-    resolvers += "jitpack" at "https://jitpack.io",
     assembly / test  := {},
     assembly / assemblyJarName := "otoroshi-extension-event-brokers-assembly_2.12-dev.jar",
     libraryDependencies ++= Seq(
-      "fr.maif" %% "otoroshi" % "16.15.3" % "provided",
+      "fr.maif" %% "otoroshi" % "16.15.4" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.0",
       munit % Test
