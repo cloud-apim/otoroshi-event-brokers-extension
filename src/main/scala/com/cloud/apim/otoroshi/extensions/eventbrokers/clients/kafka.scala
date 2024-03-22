@@ -138,7 +138,10 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
         getOffsetsOnAssign = partitions => {
           val map: Map[TopicPartition, Long] = partitionOpt match {
             case None => partitions.map(p => (p, offset)).toMap
-            case Some(part) => Map(new TopicPartition(topics.head, part) -> offset)
+            case Some(part) => partitions
+              .filter(p => topics.contains(p.topic()))
+              .map(p => (new TopicPartition(p.topic(), part), offset))
+              .toMap
           }
           map.vfuture
         },
