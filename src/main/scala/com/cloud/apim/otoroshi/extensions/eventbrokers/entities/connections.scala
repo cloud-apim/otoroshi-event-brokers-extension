@@ -37,11 +37,6 @@ object EventBrokerConnectionKind {
   }
 }
 
-// TODO: support kafka
-// TODO: support rabbitmq
-// TODO: support pulsar
-// TODO: support mqtt
-// TODO: support redis
 case class EventBrokerConnection(
    location: EntityLocation,
    id: String,

@@ -57,7 +57,6 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
   }
 
   override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    // println(s"publish to '${queueName}' - ${event.utf8String}")
     val queueName = event.vendorMetadata.get("queue")
       .orElse(opts.select("queue").asOpt[String])
       .orElse(config.settings.select("queue").asOpt[String])
@@ -85,7 +84,6 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
         val props = message.getProperties
         val envelope = message.getEnvelope
         val headers = props.getHeaders
-        // println(s"received to '${queueName}' - ${data.utf8String}")
         val contentType = Option(props.getContentType).getOrElse("binary")
         hotSource.tryEmitNext(
           EventWrapper(

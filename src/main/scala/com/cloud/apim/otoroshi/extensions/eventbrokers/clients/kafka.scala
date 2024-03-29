@@ -73,8 +73,9 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     val topic = event.vendorMetadata.get("topic")
       .orElse(opts.select("topic").asOpt[String])
       .getOrElse(kconfig.topic)
-    val key = event.vendorMetadata.get("key")
-      .orElse(opts.select("key").asOpt[String])
+    val key = event.key
+      .orElse(event.vendorMetadata.get("key").map(_.byteString))
+      .orElse(opts.select("key").asOpt[String].map(_.byteString))
     val partition = event.vendorMetadata.get("partition")
       .orElse(opts.select("partition").asOpt[String])
       .map(_.toInt)
@@ -86,7 +87,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
         topic,
         if (partition.isEmpty) null else partition.get,
         if (timestamp.isEmpty) null else timestamp.get,
-        if (key.isEmpty) null else key.get.getBytes(StandardCharsets.UTF_8),
+        if (key.isEmpty) null else key.get.toArray,
         event.data.toArray,
         buildHeaders(event, opts)
       )
