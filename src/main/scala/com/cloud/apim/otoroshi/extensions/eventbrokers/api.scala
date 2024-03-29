@@ -60,12 +60,30 @@ case class EventWrapper(
   def sseSerialize(enriched: Boolean): ByteString = {
     if (enriched) {
       key match {
-        case Some(id) => s"id: ${id.encodeBase64.utf8String}\ndata: ${json.stringify}\n\n".byteString // TODO: support event: kind
+        case Some(id) => {
+          val key: String = keyContentType.toLowerCase() match {
+            case "text" => id.utf8String
+            case "text/plain" => id.utf8String
+            case "json" => id.utf8String
+            case "application/json" => id.utf8String
+            case _ => id.encodeBase64.utf8String
+          }
+          s"id: ${key}\ndata: ${json.stringify}\n\n".byteString
+        } // TODO: support event: kind
         case None => s"data: ${json.stringify}\n\n".byteString
       }
     } else {
       key match {
-        case Some(id) => s"id: ${id.encodeBase64.utf8String}\ndata: ${data.utf8String}\n\n".byteString // TODO: support event: kind
+        case Some(id) => {
+          val key: String = keyContentType.toLowerCase() match {
+            case "text" => id.utf8String
+            case "text/plain" => id.utf8String
+            case "json" => id.utf8String
+            case "application/json" => id.utf8String
+            case _ => id.encodeBase64.utf8String
+          }
+          s"id: ${key}\ndata: ${data.utf8String}\n\n".byteString
+        } // TODO: support event: kind
         case None => s"data: ${data.utf8String}\n\n".byteString
       }
     }

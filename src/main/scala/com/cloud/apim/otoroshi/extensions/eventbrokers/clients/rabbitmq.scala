@@ -47,7 +47,7 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
       .applyOnWithOpt(wrapper.vendorMetadata.get("correlationId")) { case (builder, value) => builder.correlationId(value) }
       .applyOnWithOpt(wrapper.vendorMetadata.get("replyTo")) { case (builder, value) => builder.replyTo(value) }
       .applyOnWithOpt(wrapper.vendorMetadata.get("expiration")) { case (builder, value) => builder.expiration(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("messageId")) { case (builder, value) => builder.messageId(value) }
+      .applyOnWithOpt(wrapper.key.map(_.utf8String).orElse(wrapper.vendorMetadata.get("messageId"))) { case (builder, value) => builder.messageId(value) }
       .applyOnWithOpt(wrapper.vendorMetadata.get("timestamp")) { case (builder, value) => builder.timestamp(new Date(value.toLong)) }
       .applyOnWithOpt(wrapper.vendorMetadata.get("type")) { case (builder, value) => builder.`type`(value) }
       .applyOnWithOpt(wrapper.vendorMetadata.get("userId")) { case (builder, value) => builder.userId(value) }
@@ -81,38 +81,38 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
     val cb = new DeliverCallback() {
       override def handle(consumerTag: String, message: Delivery): Unit = {
         val data = ByteString(message.getBody)
-        val props = message.getProperties
+        val props = Option(message.getProperties)
         val envelope = message.getEnvelope
-        val headers = props.getHeaders
-        val contentType = Option(props.getContentType).getOrElse("binary")
+        val headers: Map[String, AnyRef] = props.map(_.getHeaders).map(_.asScala.toMap).getOrElse(Map.empty[String, AnyRef])
+        val contentType = headers.get("content-type").map(_.toString).orElse(props.map(_.getContentType)).filter(_ != null).getOrElse("binary")
         hotSource.tryEmitNext(
           EventWrapper(
-            key = Option(props.getMessageId).map(_.byteString),
+            key = props.flatMap(v => Option(v.getMessageId)).map(_.byteString),
             data = data,
             keyContentType = "text",
             dataContentType = contentType,
-            headers = headers.asScala.collect {
+            headers = headers.collect {
               case (key, value) if value != null => (key, value.toString)
-            }.toMap,
+            },
             vendorMetadata = Map.apply[String, String](
-              "provider" -> "rabbitmq",
-              "exchange" -> envelope.getExchange,
-              "routing_key" -> envelope.getRoutingKey,
-              "delivery_tag" -> envelope.getDeliveryTag.toString,
-              "content_type" -> props.getContentType().toString,
-              "content_encoding" -> props.getContentEncoding().toString,
-              "delivery_mode" -> props.getDeliveryMode().toString,
-              "priority" -> props.getPriority().toString,
-              "correlation_id" -> props.getCorrelationId().toString,
-              "reply_to" -> props.getReplyTo().toString,
-              "expiration" -> props.getExpiration().toString,
-              "message_id" -> props.getMessageId().toString,
-              "timestamp" -> props.getTimestamp().toString,
-              "Type" -> props.getType().toString,
-              "UserId" -> props.getUserId().toString,
-              "app_id" -> props.getAppId().toString,
-              "cluster_id" -> props.getClusterId().toString,
-            )
+                "provider" -> "rabbitmq",
+                "exchange" -> envelope.getExchange,
+                "routing_key" -> envelope.getRoutingKey,
+                "delivery_tag" -> envelope.getDeliveryTag.toString,
+              )
+              .applyOnWithOpt(props) { case (map, props) => if (props.getContentType != null) map ++ Map("content_type" -> props.getContentType) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getContentEncoding != null) map ++ Map("content_encoding" -> props.getContentEncoding) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getDeliveryMode != null) map ++ Map("delivery_mode" -> Option(props.getDeliveryMode).map(_.toString).getOrElse("")) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getPriority != null) map ++ Map("priority" -> Option(props.getPriority).map(_.toString).getOrElse("")) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getCorrelationId != null) map ++ Map("correlation_id" -> props.getCorrelationId) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getReplyTo != null) map ++ Map("reply_to" -> props.getReplyTo) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getExpiration != null) map ++ Map("expiration" -> props.getExpiration) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getMessageId != null) map ++ Map("message_id" -> props.getMessageId) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getTimestamp != null) map ++ Map("timestamp" -> Option(props.getTimestamp).map(_.toString).getOrElse("")) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getType != null) map ++ Map("type" -> props.getType) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getUserId != null) map ++ Map("UserId" -> props.getUserId) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getAppId != null) map ++ Map("app_id" -> props.getAppId) else map }
+              .applyOnWithOpt(props) { case (map, props) => if (props.getClusterId != null) map ++ Map("cluster_id" -> props.getClusterId) else map }
           )
         )
       }
