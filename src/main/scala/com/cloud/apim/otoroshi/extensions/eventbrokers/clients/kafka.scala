@@ -9,7 +9,8 @@ import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, Event
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.header.Headers
+import org.apache.kafka.common.header.{Header, Headers}
+import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import otoroshi.env.Env
@@ -55,8 +56,16 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
   private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer
 
-  private def buildHeaders(event: EventWrapper, opts: JsObject): Headers = {
-
+  private def buildHeaders(wrapper: EventWrapper, opts: JsObject): Headers = {
+    val headers = wrapper.headers ++ Map(
+      "content-type" -> wrapper.dataContentType,
+      "key-content-type" -> wrapper.keyContentType,
+      "timestamp" -> System.currentTimeMillis().toString
+    )
+    val hds: Array[Header] = headers.map {
+      case (key, value) => new RecordHeader(key, value.byteString.toArray)
+    }.toArray
+    new RecordHeaders(hds)
   }
 
   def ppublish(event: EventWrapper, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[JsValue] = {

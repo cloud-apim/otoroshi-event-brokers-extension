@@ -11,7 +11,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json.{JsObject, JsValue}
 import reactor.core.publisher.Sinks
 
-import java.util.UUID
+import java.util.{Date, UUID}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters.{mapAsJavaMapConverter, mapAsScalaMapConverter}
 
@@ -37,22 +37,22 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
   }
 
   def buildProps(wrapper: EventWrapper, opts: JsObject): AMQP.BasicProperties = {
-    val headers: java.util.Map[String, AnyRef] = wrapper.headers.asJava
+    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType)).mapValues(_.asInstanceOf[AnyRef]).asJava
     new AMQP.BasicProperties.Builder()
       .headers(headers)
-      .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(String contentType) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("contentEncoding")) { case (builder, value) => builder.contentEncoding(String contentEncoding) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("deliveryMode")) { case (builder, value) => builder.deliveryMode(Integer deliveryMode) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("priority")) { case (builder, value) => builder.priority(Integer priority) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("correlationId")) { case (builder, value) => builder.correlationId(String correlationId) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("replyTo")) { case (builder, value) => builder.replyTo(String replyTo) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("expiration")) { case (builder, value) => builder.expiration(String expiration) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("messageId")) { case (builder, value) => builder.messageId(String messageId) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("timestamp")) { case (builder, value) => builder.timestamp(Date timestamp) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("type")) { case (builder, value) => builder.type(String type) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("userId")) { case (builder, value) => builder.userId(String userId) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("appId")) { case (builder, value) => builder.appId(String appId) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("clusterId")) { case (builder, value) => builder.clusterId(String clusterId) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("contentEncoding")) { case (builder, value) => builder.contentEncoding(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("deliveryMode")) { case (builder, value) => builder.deliveryMode(value.toInt) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("priority")) { case (builder, value) => builder.priority(value.toInt) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("correlationId")) { case (builder, value) => builder.correlationId(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("replyTo")) { case (builder, value) => builder.replyTo(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("expiration")) { case (builder, value) => builder.expiration(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("messageId")) { case (builder, value) => builder.messageId(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("timestamp")) { case (builder, value) => builder.timestamp(new Date(value.toLong)) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("type")) { case (builder, value) => builder.`type`(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("userId")) { case (builder, value) => builder.userId(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("appId")) { case (builder, value) => builder.appId(value) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("clusterId")) { case (builder, value) => builder.clusterId(value) }
       .build()
   }
 

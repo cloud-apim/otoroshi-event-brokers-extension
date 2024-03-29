@@ -11,13 +11,33 @@ import scala.concurrent.{ExecutionContext, Future}
 
 object EventWrapper {
   def fromJson(json: JsValue): EventWrapper = {
+    val keyContentType = json.select("key").select("type").asOpt[String].getOrElse("binary")
+    val dataContentType = json.select("value").select("type").asOpt[String].getOrElse("binary")
+    val key: Option[ByteString] = keyContentType.toLowerCase() match {
+      case "text" => json.select("key").select("data").asOpt[String].map(_.byteString)
+      case "text/plain" => json.select("key").select("data").asOpt[String].map(_.byteString)
+      case "json" => json.select("key").select("data").asOpt[JsValue].map(_.stringify.byteString)
+      case "application/json" => json.select("key").select("data").asOpt[JsValue].map(_.stringify.byteString)
+      case "binary" => json.select("key").select("data").asOpt[String].map(_.byteString.decodeBase64)
+      case "application/octet-stream" => json.select("key").select("data").asOpt[String].map(_.byteString.decodeBase64)
+      case _ => None
+    }
+    val data: Option[ByteString] = dataContentType.toLowerCase() match {
+      case "text" =>                     json.select("value").select("data").asOpt[String].map(_.byteString)
+      case "text/plain" =>               json.select("value").select("data").asOpt[String].map(_.byteString)
+      case "json" =>                     json.select("value").select("data").asOpt[JsValue].map(_.stringify.byteString)
+      case "application/json" =>         json.select("value").select("data").asOpt[JsValue].map(_.stringify.byteString)
+      case "binary" =>                   json.select("value").select("data").asOpt[String].map(_.byteString.decodeBase64)
+      case "application/octet-stream" => json.select("value").select("data").asOpt[String].map(_.byteString.decodeBase64)
+      case _ => None
+    }
     EventWrapper(
-      key = ,
-      data = ,
-      keyContentType = ,
-      dataContentType = ,
-      headers = ,
-      vendorMetadata = ,
+      key = key,
+      data = data.getOrElse(ByteString.empty),
+      keyContentType = keyContentType,
+      dataContentType = dataContentType,
+      headers = json.select("headers").asOpt[Map[String, String]].getOrElse(Map.empty),
+      vendorMetadata = json.select("vendor_metadata").asOpt[Map[String, String]].getOrElse(Map.empty),
     )
   }
 }

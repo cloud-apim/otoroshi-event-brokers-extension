@@ -101,7 +101,7 @@ class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrok
   }
 
   def buildProps(wrapper: EventWrapper, jsObject: JsObject): Map[String, String] = {
-
+    wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType, "timestamp" -> System.currentTimeMillis().toString)
   }
 
   // TODO: handle all stuff kafka handles
