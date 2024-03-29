@@ -13,16 +13,21 @@ import reactor.core.publisher.Sinks
 
 import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future}
+import scala.jdk.CollectionConverters.{mapAsJavaMapConverter, mapAsScalaMapConverter}
 
 class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
   val factory = new ConnectionFactory()
-  factory.setHost(config.settings.select("host").asOpt[String].getOrElse("localhost"))
-  factory.setPort(config.settings.select("port").asOpt[Int].getOrElse(5672))
   factory.setVirtualHost(config.settings.select("virtual_host").asOpt[String].getOrElse("/"))
+  factory.setTopologyRecoveryEnabled(false)
+  factory.setAutomaticRecoveryEnabled(true)
+  factory.setNetworkRecoveryInterval(1000)
   config.settings.select("username").asOpt[String].filterNot(_.isBlank).foreach(v => factory.setUsername(v))
   config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => factory.setPassword(v))
-  val connection = factory.newConnection()
+  // TODO: handle declarations
+  // TODO: handle recovery
+  val servers = config.settings.select("servers").asOpt[Seq[String]].getOrElse(Seq.empty)
+  val connection = factory.newConnection(servers.map(s => Address.parseAddress(s)).toArray)
   val channel = connection.createChannel()
 
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
@@ -31,19 +36,42 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
     ().vfuture
   }
 
-  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  def buildProps(wrapper: EventWrapper, opts: JsObject): AMQP.BasicProperties = {
+    val headers: java.util.Map[String, AnyRef] = wrapper.headers.asJava
+    new AMQP.BasicProperties.Builder()
+      .headers(headers)
+      .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(String contentType) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("contentEncoding")) { case (builder, value) => builder.contentEncoding(String contentEncoding) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("deliveryMode")) { case (builder, value) => builder.deliveryMode(Integer deliveryMode) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("priority")) { case (builder, value) => builder.priority(Integer priority) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("correlationId")) { case (builder, value) => builder.correlationId(String correlationId) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("replyTo")) { case (builder, value) => builder.replyTo(String replyTo) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("expiration")) { case (builder, value) => builder.expiration(String expiration) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("messageId")) { case (builder, value) => builder.messageId(String messageId) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("timestamp")) { case (builder, value) => builder.timestamp(Date timestamp) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("type")) { case (builder, value) => builder.type(String type) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("userId")) { case (builder, value) => builder.userId(String userId) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("appId")) { case (builder, value) => builder.appId(String appId) }
+      .applyOnWithOpt(wrapper.vendorMetadata.get("clusterId")) { case (builder, value) => builder.clusterId(String clusterId) }
+      .build()
+  }
+
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     // println(s"publish to '${queueName}' - ${event.utf8String}")
-    val queueName = opts.select("queue").asOpt[String]
+    val queueName = event.vendorMetadata.get("queue")
+      .orElse(opts.select("queue").asOpt[String])
       .orElse(config.settings.select("queue").asOpt[String])
       .getOrElse("testing")
-    val routingKey = opts.select("routing_key").asOpt[String]
+    val routingKey = event.vendorMetadata.get("routing_key")
+      .orElse(opts.select("routing_key").asOpt[String])
       .orElse(config.settings.select("routing_key").asOpt[String])
+    val props = buildProps(event, opts)
     if (env.isDev) {
       channel.queueDeclare(queueName, false, false, false, null)
     }
     routingKey match {
-      case Some(routingKey) => channel.basicPublish(queueName, routingKey, null, event.toArray)
-      case None => channel.basicPublish("", queueName, null, event.toArray)
+      case Some(routingKey) => channel.basicPublish(queueName, routingKey, props, event.data.toArray)
+      case None => channel.basicPublish("", queueName, props, event.data.toArray)
     }
     Right(None).vfuture
   }
@@ -54,8 +82,41 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
     val cb = new DeliverCallback() {
       override def handle(consumerTag: String, message: Delivery): Unit = {
         val data = ByteString(message.getBody)
+        val props = message.getProperties
+        val envelope = message.getEnvelope
+        val headers = props.getHeaders
         // println(s"received to '${queueName}' - ${data.utf8String}")
-        hotSource.tryEmitNext(EventWrapper(None, data))
+        val contentType = Option(props.getContentType).getOrElse("binary")
+        hotSource.tryEmitNext(
+          EventWrapper(
+            key = Option(props.getMessageId).map(_.byteString),
+            data = data,
+            keyContentType = "text",
+            dataContentType = contentType,
+            headers = headers.asScala.collect {
+              case (key, value) if value != null => (key, value.toString)
+            }.toMap,
+            vendorMetadata = Map.apply[String, String](
+              "provider" -> "rabbitmq",
+              "exchange" -> envelope.getExchange,
+              "routing_key" -> envelope.getRoutingKey,
+              "delivery_tag" -> envelope.getDeliveryTag.toString,
+              "content_type" -> props.getContentType().toString,
+              "content_encoding" -> props.getContentEncoding().toString,
+              "delivery_mode" -> props.getDeliveryMode().toString,
+              "priority" -> props.getPriority().toString,
+              "correlation_id" -> props.getCorrelationId().toString,
+              "reply_to" -> props.getReplyTo().toString,
+              "expiration" -> props.getExpiration().toString,
+              "message_id" -> props.getMessageId().toString,
+              "timestamp" -> props.getTimestamp().toString,
+              "Type" -> props.getType().toString,
+              "UserId" -> props.getUserId().toString,
+              "app_id" -> props.getAppId().toString,
+              "cluster_id" -> props.getClusterId().toString,
+            )
+          )
+        )
       }
     }
     val cancelCb = new CancelCallback() {

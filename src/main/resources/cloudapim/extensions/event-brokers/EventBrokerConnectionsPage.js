@@ -104,7 +104,7 @@ class EventBrokerConnectionsPage extends Component {
     'settings.channel': input('string', 'Channel'),
     'settings.virtual_host': input('string', 'Virtual host'),
     'settings.queue': input('string', 'Queue name'),
-    'settings.routing_key': input('string', 'Routing kkey'),
+    'settings.routing_key': input('string', 'Routing key'),
   };
 
   columns = [
@@ -228,8 +228,7 @@ class EventBrokerConnectionsPage extends Component {
       'metadata',
       '<<<Connection options',
       'kind',
-      'settings.host',
-      'settings.port',
+      'settings.servers',
       'settings.virtual_host',
       'settings.queue',
       'settings.routing_key',
@@ -363,8 +362,7 @@ class EventBrokerConnectionsPage extends Component {
                 metadata: state.metadata,
                 kind: 'rabbitmq',
                 settings: {
-                  'host': 'localhost',
-                  'port': 5672,
+                  'servers': ['localhost:5672'],
                   'virtual_host': '/',
                   'queue': 'queue',
                   'routing_key': '',

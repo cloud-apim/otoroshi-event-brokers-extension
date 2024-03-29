@@ -1,13 +1,16 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import akka.stream.scaladsl.{Flow, Sink, Source}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.EventWrapper
 import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
+import otoroshi.next.proxy.NgProxyEngineError
 import otoroshi.utils.syntax.implicits._
 import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.http.websocket.Message
 import play.api.libs.json._
+import play.api.mvc.Results
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.DurationInt
@@ -61,34 +64,46 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
     ().vfuture
   }
 
-  override def callBackend(ctx: NgWebsocketPluginContext)(implicit env: Env, ec: ExecutionContext): Flow[Message, Message, _] = {
+  def callBackendOrError(ctx: NgWebsocketPluginContext)(implicit env: Env, ec: ExecutionContext): Future[Either[NgProxyEngineError, Flow[Message, Message, _]]] = {
     val config = ctx.cachedConfig(internalName)(IngesterConsumerWebsocketConfig.format).getOrElse(IngesterConsumerWebsocketConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
-      case None => Flow.fromSinkAndSource(Sink.ignore, Source.single(play.api.http.websocket.TextMessage("extension not available")))
+      case None => NgProxyEngineError.NgResultProxyEngineError(Results.InternalServerError(Json.obj("error" -> "extension not available"))).leftf
       case Some(extension) => {
         val clientIn = Option(config.in.ref).filterNot(_.isBlank).flatMap(v => extension.states.connection(v)).map(_.client(extension))
         val clientOut = Option(config.out.ref).filterNot(_.isBlank).flatMap(v => extension.states.connection(v)).map(_.client(extension))
         val request = NgPluginHttpRequest.fromRequest(ctx.request)
         val optsIn = PluginUtils.buildOpts(request, config.in.config, config.in.includeQuery, config.in.includeHeaders)
         val optsOut = PluginUtils.buildOpts(request, config.out.config, config.out.includeQuery, config.out.includeHeaders)
-        Flow.fromSinkAndSource(
+        val contentTypeOpt = optsIn.select("content-type").asOpt[String]
+        Flow.fromSinkAndSource[Message, Message](
           Sink.foreach { message =>
             WebsocketMessage.PlayMessage(message).bytes()(env.otoroshiMaterializer, env.otoroshiExecutionContext).map { data =>
-              clientIn.foreach(client => client.publish(data, optsIn))
+              val event = contentTypeOpt match {
+                case Some("application/vnd.cloud-apim-event-broker+json") => EventWrapper.fromJson(data.utf8String.parseJson)
+                case Some("application/json") => EventWrapper(None, data, "text", "json", Map.empty, Map.empty)
+                case Some("text/plain") => EventWrapper(None, data, "text", "text", Map.empty, Map.empty)
+                case _ => EventWrapper(None, data, "text", "binary", Map.empty, Map.empty)
+              }
+              clientIn.foreach(client => client.publish(event, optsIn, contentTypeOpt.getOrElse("application/vnd.cloud-apim-event-broker+json")))
             }
           },
           clientOut match {
             case None => Source.empty
             case Some(client) => {
-              val source = client.consume(optsOut).map(w => w.asWsMessage)
+              val enriched = optsOut.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
+              val source = client.consume(optsOut).map(w => w.wsMessage(enriched))
                 .applyOnWithOpt(optsOut.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
                 .applyOnWithOpt(optsOut.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
                 .applyOnWithOpt(optsOut.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
               source
             }
           }
-        )
+        ).rightf
       }
     }
+  }
+
+  override def callBackend(ctx: NgWebsocketPluginContext)(implicit env: Env, ec: ExecutionContext): Flow[Message, Message, _] = {
+    ???
   }
 }

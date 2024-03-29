@@ -2,6 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import com.cloud.apim.otoroshi.extensions.eventbrokers
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import io.lettuce.core.resource.{ClientResources, DefaultClientResources}
@@ -44,9 +45,13 @@ class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     ().vfuture
   }
 
-  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    val topic = opts.select("topic").asOpt[String].orElse(opts.select("channel").asOpt[String]).getOrElse(config.settings.select("channel").as[String])
-    ReactiveStreamUtils.MonoUtils.toFuture(connection.publish(topic, event)).map { r =>
+  // TODO: add options to publish enriched event
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+    val topic = event.vendorMetadata.get("channel")
+      .orElse(opts.select("topic").asOpt[String])
+      .orElse(opts.select("channel").asOpt[String])
+      .getOrElse(config.settings.select("channel").as[String])
+    ReactiveStreamUtils.MonoUtils.toFuture(connection.publish(topic, event.data)).map { r =>
       Right(None)
     }
     .recover {
@@ -54,11 +59,22 @@ class RedisBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     }
   }
 
+  // TODO: add options to consume enriched event
   override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
     val topic = opts.select("topic").asOpt[String].orElse(opts.select("channel").asOpt[String]).getOrElse(config.settings.select("channel").as[String])
     connection.subscribe(topic)
     val f: Flux[EventWrapper] = connection.observeChannels().map { cm =>
-      EventWrapper(None, cm.getMessage)
+      eventbrokers.EventWrapper(
+        key = None,
+        data = cm.getMessage,
+        keyContentType = "text",
+        dataContentType = "binary",
+        headers = Map.empty,
+        vendorMetadata = Map.apply[String, String](
+          "provider" -> "redis",
+          "channel" -> cm.getChannel
+        )
+      )
     }
     Source.fromPublisher(f)
   }

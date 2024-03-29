@@ -9,6 +9,7 @@ import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, Event
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.header.Headers
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import otoroshi.env.Env
@@ -26,6 +27,7 @@ import scala.util.control.NonFatal
 
 class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
 
+  // TODO: handle post of Json bodies with kafka vnd format, so we could extract keys
   val kconfig = KafkaConfig.format.reads(config.settings).getOrElse(KafkaConfig(
     servers = Seq("127.0.0.1:9093"),
     keyPass = None,
@@ -53,24 +55,32 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
   private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer
 
-  def ppublish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[JsValue] = {
+  private def buildHeaders(event: EventWrapper, opts: JsObject): Headers = {
+
+  }
+
+  def ppublish(event: EventWrapper, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[JsValue] = {
     val promise = Promise[RecordMetadata]
-    val topic = opts.select("topic").asOpt[String].getOrElse(kconfig.topic)
-    val key = opts.select("key").asOpt[String]
-    val partition = opts.select("partition").asOpt[String].map(_.toInt)
-    val timestamp = opts.select("timestamp").asOpt[String].map(_.toLong)
+    val topic = event.vendorMetadata.get("topic")
+      .orElse(opts.select("topic").asOpt[String])
+      .getOrElse(kconfig.topic)
+    val key = event.vendorMetadata.get("key")
+      .orElse(opts.select("key").asOpt[String])
+    val partition = event.vendorMetadata.get("partition")
+      .orElse(opts.select("partition").asOpt[String])
+      .map(_.toInt)
+    val timestamp = event.vendorMetadata.get("timestamp")
+      .orElse(opts.select("timestamp").asOpt[String])
+      .map(_.toLong)
     try {
-      val pr = key match {
-        case None => new ProducerRecord[Array[Byte], Array[Byte]](topic, event.toArray)
-        case Some(key) => new ProducerRecord[Array[Byte], Array[Byte]](
-          topic,
-          if (partition.isEmpty) null else partition.get,
-          if (timestamp.isEmpty) null else timestamp.get,
-          key.getBytes(StandardCharsets.UTF_8),
-          event.toArray,
-          null
-        )
-      }
+      val pr = new ProducerRecord[Array[Byte], Array[Byte]](
+        topic,
+        if (partition.isEmpty) null else partition.get,
+        if (timestamp.isEmpty) null else timestamp.get,
+        if (key.isEmpty) null else key.get.getBytes(StandardCharsets.UTF_8),
+        event.data.toArray,
+        buildHeaders(event, opts)
+      )
       producer.send(pr, callback(promise))
     } catch {
       case NonFatal(e) =>
@@ -104,7 +114,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
     }
 
-  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     ppublish(event, opts).map { res =>
       Right(Some(res))
     }
@@ -159,9 +169,25 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
         case r => r.offset() <= offsetToOpt.get
       }, false)
       .map { rec =>
+        val contentType = rec.headers().headers("content-type").asScala.headOption.map(v => ByteString(v.value()).utf8String).getOrElse("binary")
         EventWrapper(
-          Option(rec.key()).map(v => ByteString(v).utf8String),
-          ByteString(rec.value())
+          key = Option(rec.key()).map(v => ByteString(v)),
+          data = ByteString(rec.value()),
+          keyContentType = "binary",
+          dataContentType = contentType,
+          headers = rec.headers().asScala.toSeq.map { header =>
+            (header.key(), ByteString(header.value()).utf8String)
+          }.toMap,
+          vendorMetadata = Map(
+            "provider" -> "kafka",
+            "topic" -> rec.topic(),
+            "offset" -> rec.offset().toString,
+            "partition" -> rec.partition().toString,
+            "timestamp" -> rec.timestamp().toString,
+            "timestamp_type" -> rec.timestampType().name,
+            "serialized_key_size" -> rec.serializedKeySize().toString,
+            "serialized_value_size" -> rec.serializedValueSize().toString,
+          )
         )
       }
   }

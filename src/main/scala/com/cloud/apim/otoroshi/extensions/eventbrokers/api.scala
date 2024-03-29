@@ -4,24 +4,105 @@ import akka.stream.scaladsl.Source
 import akka.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import otoroshi.env.Env
-import play.api.libs.json.{JsObject, JsValue}
+import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 import otoroshi.utils.syntax.implicits._
 
 import scala.concurrent.{ExecutionContext, Future}
 
-// TODO: metedata ???
-case class EventWrapper(id: Option[String], data: ByteString) {
-  def asWsMessage: play.api.http.websocket.Message = {
-    play.api.http.websocket.BinaryMessage(data)
-  }
-  def serialize: ByteString = id match {
-    case Some(id) => s"id: ${id}\ndata: ${data.utf8String}\n\n".byteString
-    case None => s"data: ${data.utf8String}\n\n".byteString
+object EventWrapper {
+  def fromJson(json: JsValue): EventWrapper = {
+    EventWrapper(
+      key = ,
+      data = ,
+      keyContentType = ,
+      dataContentType = ,
+      headers = ,
+      vendorMetadata = ,
+    )
   }
 }
 
+case class EventWrapper(
+  key: Option[ByteString],
+  data: ByteString,
+  keyContentType: String,
+  dataContentType: String,
+  headers: Map[String, String],
+  vendorMetadata: Map[String, String]
+) {
+  def wsMessage(enriched: Boolean): play.api.http.websocket.Message = {
+    if (enriched) {
+      play.api.http.websocket.TextMessage(json.stringify)
+    } else {
+      play.api.http.websocket.BinaryMessage(data)
+    }
+  }
+  def sseSerialize(enriched: Boolean): ByteString = {
+    if (enriched) {
+      key match {
+        case Some(id) => s"id: ${id.encodeBase64.utf8String}\ndata: ${json.stringify}\n\n".byteString // TODO: support event: kind
+        case None => s"data: ${json.stringify}\n\n".byteString
+      }
+    } else {
+      key match {
+        case Some(id) => s"id: ${id.encodeBase64.utf8String}\ndata: ${data.utf8String}\n\n".byteString // TODO: support event: kind
+        case None => s"data: ${data.utf8String}\n\n".byteString
+      }
+    }
+  }
+  def httpSerialize(enriched: Boolean): ByteString = {
+    if (enriched) {
+      json.stringify.byteString
+    } else {
+      data
+    }
+  }
+  def jsonKey: JsValue = {
+    key match {
+      case None => JsNull
+      case Some(key) => {
+        val data = keyContentType.toLowerCase() match {
+          case "text" => key.utf8String.json
+          case "text/plain" => key.utf8String.json
+          case "json" => key.utf8String.parseJson
+          case "application/json" => key.utf8String.parseJson
+          case "binary" => key.encodeBase64.utf8String.json
+          case "application/octet-stream" => key.encodeBase64.utf8String.json
+          case _ => JsNull
+        }
+        Json.obj(
+          "type" -> keyContentType,
+          "data" -> data
+        )
+      }
+    }
+  }
+  def jsonValue: JsValue = {
+    val finaldata = dataContentType.toLowerCase() match {
+      case "text" => data.utf8String.json
+      case "text/plain" => data.utf8String.json
+      case "json" => data.utf8String.parseJson
+      case "application/json" => data.utf8String.parseJson
+      case "binary" => data.encodeBase64.utf8String.json
+      case "application/octet-stream" => data.encodeBase64.utf8String.json
+      case _ => JsNull
+    }
+    Json.obj(
+      "type" -> dataContentType,
+      "data" -> finaldata
+    )
+  }
+  def json: JsValue = Json.obj(
+    "key" -> jsonKey,
+    "value" -> jsonValue,
+    "headers" -> headers,
+    "timestamp" -> headers.get("timestamp").orElse(vendorMetadata.get("timestamp")).map(_.json).getOrElse(JsNull).asValue,
+    "vendor_metadata" -> vendorMetadata,
+  )
+}
+
 trait EventBrokerClient {
-  def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
+  def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
   def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _]
   def close()(implicit env: Env, ec: ExecutionContext): Future[Unit]
   def hash: String = config.hash

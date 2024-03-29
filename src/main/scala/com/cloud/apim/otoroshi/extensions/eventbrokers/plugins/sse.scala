@@ -46,11 +46,12 @@ class SseEventConsumer extends NgBackendCall {
         case Some(connection) => {
           val client = connection.client(extension)
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-          val source = client.consume(opts).map(w => w.serialize)
+          val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
+          val source = client.consume(opts).map(w => w.sseSerialize(enriched))
             .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
             .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
             .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
-          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-streams")), None)).vfuture
+          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-stream")), None)).vfuture
         }
       }
     }

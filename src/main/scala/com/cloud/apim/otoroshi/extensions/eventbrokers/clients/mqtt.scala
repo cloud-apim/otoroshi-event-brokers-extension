@@ -36,12 +36,13 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
     ().vfuture
   }
 
-  override def publish(event: ByteString, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    val id = opts.select("id").asOpt[String].map(_.toInt)
-    val topic = opts.select("topic").asOpt[String].getOrElse(defaulttopic)
-    val qos = opts.select("qos").asOpt[String].map(_.toInt).getOrElse(defaultqos)
-    val retained = opts.select("retained").asOpt[String].map(_.toBoolean).getOrElse(defaultretained)
-    val msg = new MqttMessage(event.toArray)
+  // TODO: add options to publish enriched event
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+    val id = event.vendorMetadata.get("id").orElse(opts.select("id").asOpt[String]).map(_.toInt)
+    val topic = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).getOrElse(defaulttopic)
+    val qos = event.vendorMetadata.get("qos").orElse(opts.select("qos").asOpt[String]).map(_.toInt).getOrElse(defaultqos)
+    val retained = event.vendorMetadata.get("retained").orElse(opts.select("retained").asOpt[String]).map(_.toBoolean).getOrElse(defaultretained)
+    val msg = new MqttMessage(event.data.toArray)
     msg.setQos(qos)
     msg.setRetained(retained)
     id.foreach(id => msg.setId(id))
@@ -55,7 +56,22 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
     val hotFlux   = hotSource.asFlux()
     client.subscribe(topic, new IMqttMessageListener {
       override def messageArrived(topic: String, message: MqttMessage): Unit = {
-        hotSource.tryEmitNext(EventWrapper(None, ByteString(message.getPayload)))
+        hotSource.tryEmitNext(
+          EventWrapper(
+            key = Option(message.getId).map(_.toString.byteString),
+            data = ByteString(message.getPayload()),
+            keyContentType = "text",
+            dataContentType = "binary",
+            headers = Map.empty,
+            vendorMetadata = Map(
+              "provider" -> "mqtt",
+              "topic" -> topic,
+              "qos" -> message.getQos.toString,
+              "is_retained" -> message.isRetained.toString,
+              "is_duplicate" -> message.isDuplicate.toString,
+            )
+          )
+        )
       }
     })
     // TODO: handle error and flux end
