@@ -64,7 +64,7 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
     ().vfuture
   }
 
-  def callBackendOrError(ctx: NgWebsocketPluginContext)(implicit env: Env, ec: ExecutionContext): Future[Either[NgProxyEngineError, Flow[Message, Message, _]]] = {
+  override def callBackendOrError(ctx: NgWebsocketPluginContext)(implicit env: Env, ec: ExecutionContext): Future[Either[NgProxyEngineError, Flow[Message, Message, _]]] = {
     val config = ctx.cachedConfig(internalName)(IngesterConsumerWebsocketConfig.format).getOrElse(IngesterConsumerWebsocketConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => NgProxyEngineError.NgResultProxyEngineError(Results.InternalServerError(Json.obj("error" -> "extension not available"))).leftf
