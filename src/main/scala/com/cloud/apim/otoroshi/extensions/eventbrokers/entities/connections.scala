@@ -122,7 +122,7 @@ object EventBrokerConnection {
         extractIdf = c => datastores.eventBrokerConnectionDatastore.extractId(c),
         extractIdJsonf = json => json.select("id").asString,
         idFieldNamef = () => "id",
-        tmpl = (v, p) => {
+        tmpl = (v, p, ctx) => {
           p.get("kind").map(_.toLowerCase()) match {
             case Some("kafka") => EventBrokerConnection(
               id = IdGenerator.namedId("provider", env),

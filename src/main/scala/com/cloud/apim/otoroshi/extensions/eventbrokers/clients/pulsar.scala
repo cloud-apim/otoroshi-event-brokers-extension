@@ -92,6 +92,9 @@ class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrok
     namespace = "namespace",
     topic = "test",
     mtlsConfig = MtlsConfig(),
+    token = None,
+    username = None,
+    password = None,
   ))
   private val client = PulsarBroker.client(env, pconfig, config.settings)
 
