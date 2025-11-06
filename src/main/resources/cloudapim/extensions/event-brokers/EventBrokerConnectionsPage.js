@@ -279,7 +279,7 @@ class EventBrokerConnectionsPage extends Component {
         rowNavigation: true,
         extractKey: (item) => item.id,
         export: true,
-        kubernetesKind: "EventBrokerConnection",
+        kubernetesKind: "event-brokers.extensions.cloud-apim.com/EventBrokerConnection",
         onStateChange: (state, oldState, update) => {
           if (!_.isEqual(state.kind, oldState.kind)) {
             if (state.kind === 'kafka') {
