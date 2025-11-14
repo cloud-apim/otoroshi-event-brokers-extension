@@ -15,7 +15,7 @@ lazy val root = (project in file("."))
     assembly / test  := {},
     assembly / assemblyJarName := "otoroshi-extension-event-brokers-assembly_2.12-dev.jar",
     libraryDependencies ++= Seq(
-      "fr.maif" %% "otoroshi" % "17.8.0" % "provided",
+      "fr.maif" %% "otoroshi" % "17.8.1" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.0",
       munit % Test
