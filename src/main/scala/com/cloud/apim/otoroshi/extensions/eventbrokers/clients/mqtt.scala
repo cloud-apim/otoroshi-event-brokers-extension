@@ -1,20 +1,19 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import org.eclipse.paho.client.mqttv3.{IMqttMessageListener, MqttClient, MqttConnectOptions, MqttMessage}
 import otoroshi.env.Env
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json.{JsObject, JsValue}
 import reactor.core.publisher.Sinks
 
 import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future}
 
-class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class MQTTBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
 
   val publisherId = config.settings.select("publisher_id").asOpt[String].getOrElse(UUID.randomUUID().toString)
   val host = config.settings.select("host").asOpt[String].getOrElse("localhost")
@@ -31,13 +30,13 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
   config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => options.setPassword(v.toCharArray))
   client.connect(options)
 
-  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
     client.close()
     ().vfuture
   }
 
   // TODO: add options to publish enriched event
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     val id = event.vendorMetadata.get("id").orElse(opts.select("id").asOpt[String]).map(_.toInt)
     val topic = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).getOrElse(defaulttopic)
     val qos = event.vendorMetadata.get("qos").orElse(opts.select("qos").asOpt[String]).map(_.toInt).getOrElse(defaultqos)
@@ -50,7 +49,7 @@ class MQTTBrokerClient(val config: EventBrokerConnection, extension: EventBroker
     Right(None).vfuture
   }
 
-  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
     val topic = opts.select("topic").asOpt[String].getOrElse(defaulttopic)
     val hotSource = Sinks.many().unicast().onBackpressureBuffer[EventWrapper]()
     val hotFlux   = hotSource.asFlux()

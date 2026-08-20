@@ -1,21 +1,20 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import com.rabbitmq.client._
 import otoroshi.env.Env
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json.{JsObject, JsValue}
 import reactor.core.publisher.Sinks
 
 import java.util.{Date, UUID}
 import scala.concurrent.{ExecutionContext, Future}
-import scala.jdk.CollectionConverters.{mapAsJavaMapConverter, mapAsScalaMapConverter}
+import scala.jdk.CollectionConverters._
 
-class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
 
   val factory = new ConnectionFactory()
   factory.setVirtualHost(config.settings.select("virtual_host").asOpt[String].getOrElse("/"))
@@ -30,14 +29,14 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
   val connection = factory.newConnection(servers.map(s => Address.parseAddress(s)).toArray)
   val channel = connection.createChannel()
 
-  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
     channel.close()
     connection.close()
     ().vfuture
   }
 
-  def buildProps(wrapper: EventWrapper, opts: JsObject): AMQP.BasicProperties = {
-    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType)).mapValues(_.asInstanceOf[AnyRef]).asJava
+  def buildProps(wrapper: EventWrapper): AMQP.BasicProperties = {
+    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType)).view.mapValues(_.asInstanceOf[AnyRef]).toMap.asJava
     new AMQP.BasicProperties.Builder()
       .headers(headers)
       .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(value) }
@@ -56,7 +55,7 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
       .build()
   }
 
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     val queueName = event.vendorMetadata.get("queue")
       .orElse(opts.select("queue").asOpt[String])
       .orElse(config.settings.select("queue").asOpt[String])
@@ -64,7 +63,7 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
     val routingKey = event.vendorMetadata.get("routing_key")
       .orElse(opts.select("routing_key").asOpt[String])
       .orElse(config.settings.select("routing_key").asOpt[String])
-    val props = buildProps(event, opts)
+    val props = buildProps(event)
     if (env.isDev) {
       channel.queueDeclare(queueName, false, false, false, null)
     }
@@ -75,7 +74,7 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, extension: EventBr
     Right(None).vfuture
   }
 
-  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
     val hotSource = Sinks.many().unicast().onBackpressureBuffer[EventWrapper]()
     val hotFlux   = hotSource.asFlux()
     val cb = new DeliverCallback() {

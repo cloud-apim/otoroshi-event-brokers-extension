@@ -1,10 +1,10 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
-import akka.stream.Materializer
-import akka.stream.scaladsl.{Framing, Source}
-import akka.util.ByteString
+import org.apache.pekko.stream.Materializer
+import org.apache.pekko.stream.scaladsl.{Framing, Source}
+import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.EventWrapper
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -13,9 +13,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
-import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
 
 class HttpEventsIngester extends NgBackendCall {
 
@@ -40,8 +38,8 @@ class HttpEventsIngester extends NgBackendCall {
     ().vfuture
   }
 
-  private def bodySource(ctx: NgbBackendCallContext, opts: JsObject)(implicit env: Env, ec: ExecutionContext): (Source[EventWrapper, _], String) = {
-    implicit val mat = env.otoroshiMaterializer
+  private def bodySource(ctx: NgbBackendCallContext, opts: JsObject)(using env: Env, ec: ExecutionContext): (Source[EventWrapper, ?], String) = {
+    given mat: Materializer = env.otoroshiMaterializer
     val contentTypeOpt = ctx.request.contentType
     val isBodyStreamed = ctx.request.transferEncoding.contains("chunked") || opts.select("body-streamed").asOpt[String].contains("true")
     val delimiter = opts.select("delimiter").asOpt[String].getOrElse("\n")
@@ -75,7 +73,7 @@ class HttpEventsIngester extends NgBackendCall {
     }
   }
 
-  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
+  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
@@ -84,7 +82,7 @@ class HttpEventsIngester extends NgBackendCall {
         case Some(connection) => {
           if (ctx.request.hasBody) {
             val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-            val client = connection.client(extension)
+            val client = connection.client()
             val (inSource, responseContentType) = bodySource(ctx, opts)
             val outSource = inSource.mapAsync(1) { chunk =>
                 client.publish(chunk, opts, "fooo").map {
@@ -127,20 +125,17 @@ class HttpEventsConsumer extends NgBackendCall {
     ().vfuture
   }
 
-  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
+  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
       case Some(extension) => extension.states.connection(config.ref) match {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
-          val client = connection.client(extension)
+          val client = connection.client()
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          val source = client.consume(opts).map(w => w.httpSerialize(enriched) ++ ByteString("\n"))
-            .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
-            .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
-            .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
+          val source = client.consume(opts).map(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-nd-event")), None)).vfuture
         }
       }

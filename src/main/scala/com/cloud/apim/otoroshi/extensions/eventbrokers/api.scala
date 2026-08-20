@@ -1,7 +1,7 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import otoroshi.env.Env
 import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
@@ -140,9 +140,9 @@ case class EventWrapper(
 }
 
 trait EventBrokerClient {
-  def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
-  def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _]
-  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit]
+  def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
+  def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?]
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit]
   def hash: String = config.hash
   def config: EventBrokerConnection
 }

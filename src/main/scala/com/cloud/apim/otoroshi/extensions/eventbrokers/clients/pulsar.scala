@@ -1,10 +1,10 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
-import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultProducerMessage, DefaultPulsarClient, MessageId, ProducerConfig, ProducerMessage, PulsarClient, PulsarClientConfig, Subscription, Topic, Consumer => PulsarConsumer, Producer => PulsarProducer}
+import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultProducerMessage, DefaultPulsarClient, MessageId, ProducerConfig, PulsarClient, PulsarClientConfig, Subscription, Topic, Consumer as PulsarConsumer, Producer as PulsarProducer}
 import org.apache.pulsar.client.api.{Authentication, Schema}
 import org.apache.pulsar.client.impl.auth._
 import org.apache.pulsar.client.impl.schema.SchemaInfoImpl
@@ -13,20 +13,19 @@ import otoroshi.env.Env
 import otoroshi.events.PulsarConfig
 import otoroshi.utils.http.MtlsConfig
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 
 import scala.concurrent.{ExecutionContext, Future}
 
 object PulsarBroker {
 
-  implicit val byteStringSchema = new Schema[ByteString] {
+  given byteStringSchema: Schema[ByteString] = new Schema[ByteString] {
     override def clone(): Schema[ByteString] = this
     override def encode(t: ByteString): Array[Byte] = t.toArray
     override def decode(bytes: Array[Byte]): ByteString = if (bytes == null) ByteString.empty else ByteString(bytes)
     override def getSchemaInfo: SchemaInfo = {
       SchemaInfoImpl.builder()
-        .name(manifest[ByteString].runtimeClass.getCanonicalName)
+        .name(classOf[ByteString].getCanonicalName)
         .`type`(SchemaType.BYTES)
         .schema(Array.empty[Byte])
         .build()
@@ -35,7 +34,7 @@ object PulsarBroker {
 
   def client(_env: otoroshi.env.Env, config: PulsarConfig, rawConfig: JsObject): PulsarClient = {
     if (config.mtlsConfig.mtls) {
-      val (_, jks, password) = config.mtlsConfig.toJKS(_env)
+      val (_, jks, password) = config.mtlsConfig.toJKS(using _env)
       val builder = org.apache.pulsar.client.api.PulsarClient
         .builder()
         .serviceUrl(config.uri)
@@ -68,22 +67,22 @@ object PulsarBroker {
     }
   }
 
-  def producer(client: PulsarClient, config: PulsarConfig, topicName: String, globalConfig: JsValue, connConfig: JsValue): PulsarProducer[ByteString] = {
+  // TODO: configure based on opts and global config
+  def producer(client: PulsarClient, config: PulsarConfig, topicName: String): PulsarProducer[ByteString] = {
     val topic          = Topic(s"persistent://${config.tenant}/${config.namespace}/${topicName}")
-    // TODO: configure based on opts and global config
     val producerConfig = ProducerConfig(topic)
     client.producer[ByteString](producerConfig)
   }
 
-  def consumer(client: PulsarClient, config: PulsarConfig, topicName: String, globalConfig: JsValue, connConfig: JsValue): PulsarConsumer[ByteString] = {
+  // TODO: configure based on opts and global config
+  def consumer(client: PulsarClient, config: PulsarConfig, topicName: String): PulsarConsumer[ByteString] = {
     val topic          = Topic(s"persistent://${config.tenant}/${config.namespace}/${topicName}")
-    // TODO: configure based on opts and global config
     val consumerConfig = ConsumerConfig(topics = Seq(topic), subscriptionName = Subscription("otoroshi"))
     client.consumer[ByteString](consumerConfig)
   }
 }
 
-class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class PulsarBrokerClient(val config: EventBrokerConnection, env: Env) extends EventBrokerClient {
 
   private val pconfig = PulsarConfig.format.reads(config.settings).getOrElse(PulsarConfig( // TODO: handle auth !!!!!
     uri = "pulsar://localhost:6650",
@@ -98,37 +97,36 @@ class PulsarBrokerClient(val config: EventBrokerConnection, extension: EventBrok
   ))
   private val client = PulsarBroker.client(env, pconfig, config.settings)
 
-  override def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
+  override def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
     client.close()
     ().vfuture
   }
 
-  def buildProps(wrapper: EventWrapper, jsObject: JsObject): Map[String, String] = {
+  def buildProps(wrapper: EventWrapper): Map[String, String] = {
     wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType, "timestamp" -> System.currentTimeMillis().toString)
   }
 
   // TODO: handle all stuff kafka handles
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     val topic = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).getOrElse(pconfig.topic)
-    val producer = PulsarBroker.producer(client, pconfig, topic, config.settings, opts)
-    producer.sendAsync(DefaultProducerMessage(
+    val producer = PulsarBroker.producer(client, pconfig, topic)
+    producer.sendAsync[Future](DefaultProducerMessage(
       key = event.key.map(_.utf8String),
       value = event.data,
-      props = buildProps(event: EventWrapper, opts: JsObject),
-    )).map { id =>
-      Right(Some(Json.obj("id" -> ByteString(id.bytes).utf8String)))
-    }
+      props = buildProps(event),
+    ))
+    .map(id => Right(Some(Json.obj("id" -> ByteString(id.bytes).utf8String))): Either[JsValue, Option[JsValue]])
     .recover {
       case e: Throwable => Left(Json.obj("error" -> e.getMessage))
     }
   }
 
-  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
     // TODO: handle specifi pulsar stuff
     val topic = opts.select("topic").asOpt[String].getOrElse(pconfig.topic)
     // val messageId = opts.select("from")
-    val consumer = PulsarBroker.consumer(client, pconfig, topic, config.settings, opts)
-    val source = com.sksamuel.pulsar4s.akka.streams.source(() => consumer, Some(MessageId.latest)) // TODO: handle messageId
+    val consumer = PulsarBroker.consumer(client, pconfig, topic)
+    val source = com.sksamuel.pulsar4s.pekko.streams.source(() => consumer, Some(MessageId.latest)) // TODO: handle messageId
     source.map { csm =>
       val contentType = csm.props.get("content-type").getOrElse("binary")
       EventWrapper(

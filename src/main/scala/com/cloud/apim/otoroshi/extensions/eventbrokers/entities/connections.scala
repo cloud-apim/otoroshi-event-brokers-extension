@@ -9,31 +9,26 @@ import otoroshi.next.extensions._
 import otoroshi.security.IdGenerator
 import otoroshi.storage._
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokersExtension, EventBrokersExtensionDatastores, EventBrokersExtensionState}
+import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokersExtensionDatastores, EventBrokersExtensionState}
 import play.api.libs.json._
 
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Success, Try}
 
-sealed trait EventBrokerConnectionKind {
-  def name: String
+enum EventBrokerConnectionKind(val name: String) {
+  case Kafka    extends EventBrokerConnectionKind("kafka")
+  case RabbitMQ extends EventBrokerConnectionKind("rabbitmq")
+  case Pulsar   extends EventBrokerConnectionKind("pulsar")
+  case Redis    extends EventBrokerConnectionKind("redis")
+  case MQTT     extends EventBrokerConnectionKind("mqtt")
   def json: JsValue = name.json
 }
 
 object EventBrokerConnectionKind {
-  case object Kafka extends EventBrokerConnectionKind { def name: String = "kafka" }
-  case object RabbitMQ extends EventBrokerConnectionKind { def name: String = "rabbitmq" }
-  case object Pulsar extends EventBrokerConnectionKind { def name: String = "pulsar" }
-  case object Redis extends EventBrokerConnectionKind { def name: String = "redis" }
-  case object MQTT extends EventBrokerConnectionKind { def name: String = "mqtt" }
-  def apply(str: String): Option[EventBrokerConnectionKind] = str.toLowerCase match {
-    case "kafka" => Kafka.some
-    case "rabbitmq" => RabbitMQ.some
-    case "pulsar" => Pulsar.some
-    case "redis" => Redis.some
-    case "mqtt" => MQTT.some
-    case _ => None
+  def apply(str: String): Option[EventBrokerConnectionKind] = {
+    val lower = str.toLowerCase
+    values.find(_.name == lower)
   }
 }
 
@@ -57,20 +52,20 @@ case class EventBrokerConnection(
 
   def hash: String = s"${id}-${settings.stringify}".sha256
 
-  def newClientInstance(ext: EventBrokersExtension)(implicit env: Env, ec: ExecutionContext): EventBrokerClient = kind match {
-    case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, ext, env)
-    case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, ext, env)
-    case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this, ext, env)
-    case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this, ext, env)
-    case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this, ext, env)
+  def newClientInstance()(using env: Env): EventBrokerClient = kind match {
+    case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, env)
+    case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, env)
+    case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this)
+    case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this)
+    case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this)
   }
 
-  def client(ext: EventBrokersExtension)(implicit env: Env, ec: ExecutionContext): EventBrokerClient = {
+  def client()(using env: Env, ec: ExecutionContext): EventBrokerClient = {
     val client = EventBrokerConnection.cache.getOrElseUpdate(id, {
-      newClientInstance(ext)
+      newClientInstance()
     })
     if (client.hash != hash) {
-      val newClient = newClientInstance(ext)
+      val newClient = newClientInstance()
       EventBrokerConnection.cache.put(id, newClient)
       client.close()
       newClient
@@ -82,7 +77,7 @@ case class EventBrokerConnection(
 
 object EventBrokerConnection {
   val cache = new TrieMap[String, EventBrokerClient]()
-  val format = new Format[EventBrokerConnection] {
+  given format: Format[EventBrokerConnection] = new Format[EventBrokerConnection] {
     override def writes(o: EventBrokerConnection): JsValue             = o.location.jsonWithKey ++ Json.obj(
       "id"          -> o.id,
       "name"        -> o.name,
@@ -122,18 +117,8 @@ object EventBrokerConnection {
         extractIdf = c => datastores.eventBrokerConnectionDatastore.extractId(c),
         extractIdJsonf = json => json.select("id").asString,
         idFieldNamef = () => "id",
-        tmpl = (v, p, ctx) => {
+        tmpl = (_, p, _) => {
           p.get("kind").map(_.toLowerCase()) match {
-            case Some("kafka") => EventBrokerConnection(
-              id = IdGenerator.namedId("provider", env),
-              name = "Kafka connection",
-              description = "A Kafka connection",
-              metadata = Map.empty,
-              tags = Seq.empty,
-              location = EntityLocation.default,
-              kind = EventBrokerConnectionKind.Kafka,
-              settings = Json.obj(),
-            ).json
             case Some("rabbitmq") => EventBrokerConnection(
               id = IdGenerator.namedId("provider", env),
               name = "RabbitMQ connection",
@@ -175,8 +160,8 @@ trait EventBrokerConnectionDatastore extends BasicStore[EventBrokerConnection]
 class KvEventBrokerConnectionDatastore(extensionId: AdminExtensionId, redisCli: RedisLike, _env: Env)
   extends EventBrokerConnectionDatastore
     with RedisLikeStore[EventBrokerConnection] {
-  override def fmt: Format[EventBrokerConnection]      = EventBrokerConnection.format
-  override def redisLike(implicit env: Env): RedisLike = redisCli
-  override def key(id: String): String                 = s"${_env.storageRoot}:extensions:${extensionId.cleanup}:connections:$id"
-  override def extractId(value: EventBrokerConnection): String    = value.id
+  override def fmt: Format[EventBrokerConnection]   = EventBrokerConnection.format
+  override def redisLike(using env: Env): RedisLike = redisCli
+  override def key(id: String): String              = s"${_env.storageRoot}:extensions:${extensionId.cleanup}:connections:$id"
+  override def extractId(value: EventBrokerConnection): String = value.id
 }
