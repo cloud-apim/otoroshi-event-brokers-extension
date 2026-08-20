@@ -29,6 +29,7 @@ lazy val root = (project in file("."))
     assembly / assemblyPackageScala / assembleArtifact := false,
     libraryDependencies ++= Seq(
       "fr.maif" %% "otoroshi" % "18.0.0-preview2" % "provided",
+      "fr.maif" %% "otoroshi" % "17.17.0" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.0",
       munit % Test
