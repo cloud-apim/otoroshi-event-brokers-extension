@@ -1,9 +1,5 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import akka.kafka.scaladsl.Consumer
-import akka.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
-import akka.stream.scaladsl.Source
-import akka.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import org.apache.kafka.clients.consumer.ConsumerConfig
@@ -13,20 +9,22 @@ import org.apache.kafka.common.header.{Header, Headers}
 import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
+import org.apache.pekko.kafka.scaladsl.Consumer
+import org.apache.pekko.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
 import otoroshi.events.KafkaConfig
 import otoroshi.events.KafkaSettings.kafkaSettings
 import otoroshi.utils.http.MtlsConfig
 import otoroshi.utils.syntax.implicits._
-import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBrokersExtension
 import play.api.libs.json.{JsObject, JsValue, Json}
 
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
-class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBrokersExtension, env: Env) extends EventBrokerClient {
+class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends EventBrokerClient {
 
   // TODO: handle post of Json bodies with kafka vnd format, so we could extract keys
   val kconfig = KafkaConfig.format.reads(config.settings).getOrElse(KafkaConfig(
@@ -54,9 +52,9 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     .withProperties(kafkaSettings(env, kconfig))
     .withBootstrapServers(kconfig.servers.mkString(","))
 
-  private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer
+  private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer()
 
-  private def buildHeaders(wrapper: EventWrapper, opts: JsObject): Headers = {
+  private def buildHeaders(wrapper: EventWrapper): Headers = {
     val headers = wrapper.headers ++ Map(
       "content-type" -> wrapper.dataContentType,
       "key-content-type" -> wrapper.keyContentType,
@@ -68,8 +66,8 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     new RecordHeaders(hds)
   }
 
-  def ppublish(event: EventWrapper, opts: JsObject)(implicit env: Env, ec: ExecutionContext): Future[JsValue] = {
-    val promise = Promise[RecordMetadata]
+  def ppublish(event: EventWrapper, opts: JsObject)(using ec: ExecutionContext): Future[JsValue] = {
+    val promise = Promise[RecordMetadata]()
     val topic = event.vendorMetadata.get("topic")
       .orElse(opts.select("topic").asOpt[String])
       .getOrElse(kconfig.topic)
@@ -89,7 +87,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
         if (timestamp.isEmpty) null else timestamp.get,
         if (key.isEmpty) null else key.get.toArray,
         event.data.toArray,
-        buildHeaders(event, opts)
+        buildHeaders(event)
       )
       producer.send(pr, callback(promise))
     } catch {
@@ -108,14 +106,14 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     }
   }
 
-  def close()(implicit env: Env, ec: ExecutionContext): Future[Unit] = {
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
     producer.close()
     ().vfuture
   }
 
   private def callback(promise: Promise[RecordMetadata]) =
     new Callback {
-      override def onCompletion(metadata: RecordMetadata, exception: Exception) =
+      override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit =
         if (exception != null) {
           promise.failure(exception)
         } else {
@@ -124,14 +122,14 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
 
     }
 
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(implicit env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
+  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     ppublish(event, opts).map { res =>
       Right(Some(res))
     }
   }
 
-  // https://doc.akka.io/docs/alpakka-kafka/2.0.7/consumer.html
-  override def consume(opts: JsObject)(implicit env: Env, ec: ExecutionContext): Source[EventWrapper, _] = {
+  // https://pekko.apache.org/docs/pekko-connectors-kafka/current/consumer.html
+  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
 
     import scala.jdk.CollectionConverters._
 
@@ -145,10 +143,10 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
     val autoOffsetResetOpt = opts.select("auto_offset_reset").asOpt[String].orElse(config.settings.select("auto_offset_reset").asOpt[String]) // earliest, latest, none
 
     val localSettings = consumerSettings
-      .applyOnWithOpt(groupIdOpt) { case (s, groupId) => s.withGroupId(groupId) }
-      .applyOnWithOpt(clientIdOpt) { case (s, clientId) => s.withClientId(clientId) }
-      .applyOnWithOpt(groupInstanceIdOpt) { case (s, groupInstanceId) => s.withGroupInstanceId(groupInstanceId) }
-      .applyOnWithOpt(autoOffsetResetOpt) { case (s, autoOffsetReset) => s.withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset) }
+      .applyOnWithOpt(groupIdOpt)((s, groupId) => s.withGroupId(groupId))
+      .applyOnWithOpt(clientIdOpt)((s, clientId) => s.withClientId(clientId))
+      .applyOnWithOpt(groupInstanceIdOpt)((s, groupInstanceId) => s.withGroupInstanceId(groupInstanceId))
+      .applyOnWithOpt(autoOffsetResetOpt)((s, autoOffsetReset) => s.withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset))
       .applyOnIf(groupIdOpt.isEmpty)(_.withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true"))
       // TODO: delivery
 
@@ -165,19 +163,14 @@ class KafkaBrokerClient(val config: EventBrokerConnection, extension: EventBroke
           }
           map.vfuture
         },
-        onRevoke = partitions => ()
+        onRevoke = _ => ()
       )
     }
-    val consumer = consumerRaw.filter {
-        case (_, _) if partitionOpt.isEmpty => true
-        case (topicPartition, _) if partitionOpt.nonEmpty => partitionOpt.contains(topicPartition.partition())
-      }
+    val consumer = consumerRaw
+      .filter((topicPartition, _) => partitionOpt.forall(_ == topicPartition.partition()))
       .flatMapConcat(_._2)
     consumer
-      .takeWhile({
-        case _ if offsetToOpt.isEmpty => true
-        case r => r.offset() <= offsetToOpt.get
-      }, false)
+      .takeWhile(rec => offsetToOpt.forall(rec.offset() <= _), false)
       .map { rec =>
         val contentType = rec.headers().headers("content-type").asScala.headOption.map(v => ByteString(v.value()).utf8String).getOrElse("binary")
         EventWrapper(

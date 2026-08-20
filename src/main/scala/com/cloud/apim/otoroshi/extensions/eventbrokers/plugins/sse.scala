@@ -1,7 +1,7 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
-import akka.stream.Materializer
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils}
+import org.apache.pekko.stream.Materializer
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -10,9 +10,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
-import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
 
 class SseEventConsumer extends NgBackendCall {
 
@@ -37,20 +35,17 @@ class SseEventConsumer extends NgBackendCall {
     ().vfuture
   }
 
-  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(implicit env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
+  override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
       case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
       case Some(extension) => extension.states.connection(config.ref) match {
         case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
         case Some(connection) => {
-          val client = connection.client(extension)
+          val client = connection.client()
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          val source = client.consume(opts).map(w => w.sseSerialize(enriched))
-            .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong)) { case (source, drop) => source.drop(drop) }
-            .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong)) { case (source, limit) => source.take(limit) }
-            .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis)) { case (source, duration) => source.takeWithin(duration) }
+          val source = client.consume(opts).map(w => w.sseSerialize(enriched)).withStreamOptions(opts)
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-stream")), None)).vfuture
         }
       }

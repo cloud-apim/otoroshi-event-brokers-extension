@@ -1,9 +1,11 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
+import org.apache.pekko.stream.scaladsl.Source
 import otoroshi.next.plugins.api.{NgPluginConfig, NgPluginHttpRequest}
 import play.api.libs.json.{Format, JsError, JsObject, JsResult, JsSuccess, JsValue, Json}
 import otoroshi.utils.syntax.implicits._
 
+import scala.concurrent.duration.DurationInt
 import scala.util.{Failure, Success, Try}
 
 
@@ -13,7 +15,7 @@ case class EventBrokerPluginConfig(ref: String, config: Map[String, String], inc
 
 object EventBrokerPluginConfig {
   val default = EventBrokerPluginConfig("", Map.empty, true, true)
-  val format = new Format[EventBrokerPluginConfig] {
+  given format: Format[EventBrokerPluginConfig] = new Format[EventBrokerPluginConfig] {
     override def reads(json: JsValue): JsResult[EventBrokerPluginConfig] = Try {
       EventBrokerPluginConfig(
         ref = json.select("ref").asOpt[String].getOrElse(""),
@@ -62,7 +64,20 @@ object PluginUtils {
     val headers: Map[String, String] = if (!includeHeaders) Map.empty else req.headers.collect {
       case (key, value) if key.startsWith(prefix) => (key.replaceFirst(prefix, ""), value)
     }
-    val all = (query ++ headers ++ localConfig).mapValues(_.json)
+    val all = (query ++ headers ++ localConfig).view.mapValues(_.json).toMap
     JsObject(all)
+  }
+}
+
+/**
+ * The `drop` / `take` / `duration` triple is applied identically by every consuming plugin
+ * (http, sse and websocket), so it lives here once.
+ */
+extension [Out, Mat](source: Source[Out, Mat]) {
+  def withStreamOptions(opts: JsObject): Source[Out, Mat] = {
+    source
+      .applyOnWithOpt(opts.select("drop").asOpt[String].map(_.toLong))((s, drop) => s.drop(drop))
+      .applyOnWithOpt(opts.select("take").asOpt[String].map(_.toLong))((s, limit) => s.take(limit))
+      .applyOnWithOpt(opts.select("duration").asOpt[String].map(_.toInt.millis))((s, duration) => s.takeWithin(duration))
   }
 }
