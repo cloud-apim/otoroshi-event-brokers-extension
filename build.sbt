@@ -28,7 +28,7 @@ lazy val root = (project in file("."))
     // second copy of the whole stdlib in the plugin jar
     assembly / assemblyPackageScala / assembleArtifact := false,
     libraryDependencies ++= Seq(
-      "fr.maif" %% "otoroshi" % "18.0.0-rc2" % "provided",
+      "fr.maif" %% "otoroshi" % "18.0.0-rc3" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       "org.eclipse.paho" % "org.eclipse.paho.client.mqttv3" % "1.2.0",
       munit % Test
