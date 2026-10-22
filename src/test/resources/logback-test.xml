@@ -1,0 +1,17 @@
+<!-- picked before the logback.xml shipped in the otoroshi jar: keeps the test output readable -->
+<configuration>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%date{HH:mm:ss.SSS} %-5level %logger{30} - %message%n%xException{10}</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="cloud-apim-event-brokers-extension" level="INFO" />
+  <logger name="org.testcontainers" level="INFO" />
+  <logger name="tc" level="INFO" />
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT" />
+  </root>
+</configuration>
