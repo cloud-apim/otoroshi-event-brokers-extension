@@ -122,6 +122,20 @@ class EventBrokerConnectionsPage extends Component {
     'settings.tls.start_tls': input('bool', 'STARTTLS'),
     'settings.tls.verify_peer': input('bool', 'Verify the server certificate'),
     // mqtt
+    'settings.version': input('select', 'MQTT version', {
+      possibleValues: [
+        { value: 5, label: 'MQTT 5' },
+        { value: 3, label: 'MQTT 3.1.1' },
+      ],
+    }),
+    'settings.transport': input('select', 'Transport', {
+      possibleValues: [
+        { value: 'tcp', label: 'TCP' },
+        { value: 'websocket', label: 'Websocket' },
+      ],
+    }),
+    'settings.websocket_path': input('string', 'Websocket path'),
+    'settings.session_expiry_seconds': input('number', 'Session expiry (seconds, MQTT 5)'),
     'settings.client_id_prefix': input('string', 'Client id prefix', { help: 'Every client adds a random suffix' }),
     'settings.default_qos': input('select', 'Default QoS', {
       possibleValues: [0, 1, 2].map((v) => ({ value: v, label: String(v) })),
@@ -220,17 +234,23 @@ class EventBrokerConnectionsPage extends Component {
         ]);
       case 'mqtt':
         return head.concat([
+          'settings.version',
           'settings.host',
           'settings.port',
+          'settings.transport',
+        ], (state.settings && state.settings.transport === 'websocket') ? ['settings.websocket_path'] : [], [
           'settings.default_topic',
           'settings.default_qos',
           'settings.retain',
           '>>>Authentication',
           'settings.username',
           'settings.password',
+          '>>>TLS',
+        ], tls, [
           '>>>Session',
           'settings.client_id_prefix',
           'settings.clean_session',
+          'settings.session_expiry_seconds',
           'settings.connection_timeout_seconds',
           'settings.keep_alive_seconds',
         ]);

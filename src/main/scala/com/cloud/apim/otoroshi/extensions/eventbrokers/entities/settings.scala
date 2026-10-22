@@ -464,6 +464,12 @@ object RedisSettings {
 final case class MqttSettings(
     host: String,
     port: Int = 1883,
+    /** 5, or 3 for mqtt 3.1.1 */
+    version: Int = 5,
+    /** tcp, or websocket */
+    transport: String = "tcp",
+    websocketPath: String = "/mqtt",
+    tls: TlsSettings = TlsSettings(),
     /** each client gets this prefix and a random suffix: every node needs a client id of its own */
     clientIdPrefix: String = "otoroshi",
     username: Option[String] = None,
@@ -472,15 +478,23 @@ final case class MqttSettings(
     defaultQos: Int = 0,
     retain: Boolean = false,
     cleanSession: Boolean = true,
+    /** mqtt 5: how long the broker keeps the session once disconnected */
+    sessionExpirySeconds: Long = 0L,
     connectionTimeoutSeconds: Int = 10,
     keepAliveSeconds: Int = 60
 ) extends BrokerSettings {
 
   def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.MQTT
 
+  def isV5: Boolean = version == 5
+
   def json: JsObject = Json.obj(
     "host"                       -> host,
     "port"                       -> port,
+    "version"                    -> version,
+    "transport"                  -> transport,
+    "websocket_path"             -> websocketPath,
+    "tls"                        -> tls.json,
     "client_id_prefix"           -> clientIdPrefix,
     "username"                   -> username,
     "password"                   -> password,
@@ -488,6 +502,7 @@ final case class MqttSettings(
     "default_qos"                -> defaultQos,
     "retain"                     -> retain,
     "clean_session"              -> cleanSession,
+    "session_expiry_seconds"     -> sessionExpirySeconds,
     "connection_timeout_seconds" -> connectionTimeoutSeconds,
     "keep_alive_seconds"         -> keepAliveSeconds
   )
@@ -495,12 +510,23 @@ final case class MqttSettings(
 
 object MqttSettings {
   def read(json: JsObject): Either[Seq[String], MqttSettings] = Fields.read(json) { f =>
-    val prefix = f.get[String]("client_id_prefix", "otoroshi")
+    val prefix  = f.get[String]("client_id_prefix", "otoroshi")
     // mqtt 3.1.1 servers only have to accept 23 characters: the random suffix takes 9
     f.check("client_id_prefix", prefix.length <= 14 && prefix.matches("^[0-9a-zA-Z-]*$"), "at most 14 letters, digits or dashes")
+    val version = f.get[Int]("version", 5)
+    if (version != 3 && version != 5) f.error("version", "must be 3 (mqtt 3.1.1) or 5")
+    val expiry  = f.get[Long]("session_expiry_seconds", 0L)
+    if (expiry < 0 || expiry > 4294967295L) f.error("session_expiry_seconds", "must be between 0 and 4294967295")
+    if (expiry > 0 && version != 5) f.error("session_expiry_seconds", "is an mqtt 5 setting")
+    val path    = f.get[String]("websocket_path", "/mqtt")
+    f.check("websocket_path", path.startsWith("/"), "must start with /")
     MqttSettings(
       host = f.requiredString("host").getOrElse(""),
       port = f.intIn("port", 1883, 1, 65535),
+      version = version,
+      transport = f.oneOf("transport", "tcp", Seq("tcp", "websocket")),
+      websocketPath = path,
+      tls = f.obj("tls")(TlsSettings.readFields),
       clientIdPrefix = prefix,
       username = f.optString("username"),
       password = f.optString("password"),
@@ -508,9 +534,9 @@ object MqttSettings {
       defaultQos = f.intIn("default_qos", 0, 0, 2),
       retain = f.get[Boolean]("retain", false),
       cleanSession = f.get[Boolean]("clean_session", true),
+      sessionExpirySeconds = expiry,
       connectionTimeoutSeconds = f.intIn("connection_timeout_seconds", 10, 1, 300),
       keepAliveSeconds = f.intIn("keep_alive_seconds", 60, 0, 65535)
     )
   }
 }
-

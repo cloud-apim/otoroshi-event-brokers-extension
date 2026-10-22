@@ -211,6 +211,8 @@ object CloudEvent {
  *    as the payload, its content type in `content-type`, `partitionkey` as the message key
  *  - rabbitmq: binary mode, the attributes in `cloudEvents:` application properties, the content type
  *    in the amqp content-type
+ *  - mqtt 5: binary mode, the attributes as user properties (no prefix, as the mqtt binding says), the
+ *    content type as the content type of the message
  *  - redis and mqtt 3.1.1, which carry no headers: structured mode, the whole event as json
  *
  * A message published without cloudevents (by another producer) is still read as an event: its id is
@@ -221,17 +223,18 @@ object CloudEventBindings {
 
   import EventBrokerConnectionKind.*
 
-  def toMessage(event: CloudEvent, kind: EventBrokerConnectionKind, routing: Map[String, String] = Map.empty): BrokerMessage = kind match {
-    case Kafka | Pulsar => binary(event, "ce_", routing).copy(key = event.extension("partitionkey").map(ByteString(_)))
-    case RabbitMQ       =>
-      val message = binary(event, "cloudEvents:", routing)
-      message.copy(
-        headers = message.headers - "content-type",
-        metadata = message.metadata ++ event.datacontenttype.map(ct => "content_type" -> ct)
-      )
-    case Redis | MQTT   =>
-      BrokerMessage(data = ByteString(Json.stringify(event.json)), metadata = routing)
-  }
+  /** `headers`: whether the client can carry headers (mqtt 5 can, 3.1.1 cannot) */
+  def toMessage(event: CloudEvent, kind: EventBrokerConnectionKind, routing: Map[String, String] = Map.empty, headers: Boolean = true): BrokerMessage =
+    kind match {
+      case Kafka | Pulsar        => binary(event, "ce_", routing).copy(key = event.extension("partitionkey").map(ByteString(_)))
+      case RabbitMQ              => withContentTypeProperty(binary(event, "cloudEvents:", routing), event)
+      case MQTT if headers       => withContentTypeProperty(binary(event, "", routing), event)
+      case Redis | MQTT          => BrokerMessage(data = ByteString(Json.stringify(event.json)), metadata = routing)
+    }
+
+  /** the protocols with a content type of their own (amqp, mqtt 5) */
+  private def withContentTypeProperty(message: BrokerMessage, event: CloudEvent): BrokerMessage =
+    message.copy(headers = message.headers - "content-type", metadata = message.metadata ++ event.datacontenttype.map(ct => "content_type" -> ct))
 
   private def binary(event: CloudEvent, prefix: String, routing: Map[String, String]): BrokerMessage = {
     val attributes = Map(
@@ -254,7 +257,8 @@ object CloudEventBindings {
       case RabbitMQ       =>
         fromHeaders(message, "cloudEvents:", message.metadata.get("content_type"))
           .orElse(fromHeaders(message, "cloudEvents_", message.metadata.get("content_type")))
-      case Redis | MQTT   => None
+      case MQTT           => fromHeaders(message, "", message.metadata.get("content_type"))
+      case Redis          => None
     }
     val withMetadata = (e: CloudEvent) => e.copy(extensions = brokerExtensions(message, kind) ++ e.extensions)
     withMetadata(event.orElse(structured(message, kind)).getOrElse(synthesized(message, kind)))
@@ -287,8 +291,8 @@ object CloudEventBindings {
   /** the whole event in the payload: what redis and mqtt carry, or what another producer chose to send */
   private def structured(message: BrokerMessage, kind: EventBrokerConnectionKind): Option[CloudEvent] = {
     val declared = kind match {
-      case RabbitMQ => message.metadata.get("content_type")
-      case _        => message.headers.get("content-type")
+      case RabbitMQ | MQTT => message.metadata.get("content_type")
+      case _               => message.headers.get("content-type")
     }
     val worthTrying = declared.exists(ct => CloudEvent.mediaType(ct) == CloudEvent.ContentType) ||
       (declared.isEmpty && message.data.headOption.contains('{'.toByte))
@@ -315,8 +319,8 @@ object CloudEventBindings {
       case _        => None
     }
     val declared    = kind match {
-      case RabbitMQ => message.metadata.get("content_type")
-      case _        => message.headers.get("content-type")
+      case RabbitMQ | MQTT => message.metadata.get("content_type")
+      case _               => message.headers.get("content-type")
     }
     // nothing says what the payload is: json if it reads as json, text if it reads as text
     val contentType = declared.orElse {
