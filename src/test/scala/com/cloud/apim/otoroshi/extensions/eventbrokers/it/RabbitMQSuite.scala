@@ -8,6 +8,8 @@ import scala.concurrent.duration.*
 
 class RabbitMQSuite extends BrokerSuite {
 
+  import Gateway.given
+
   override def startBroker(): Unit = { Brokers.rabbitmq; () }
 
   lazy val connection: String = Gateway.createConnection(
@@ -77,14 +79,59 @@ class RabbitMQSuite extends BrokerSuite {
     assertEquals(numbers(received.map(e => Json.parse(e.data))), Seq(0, 1, 2))
   }
 
-  // the consumer is registered with auto-ack and never cancelled: once the http client is gone it
-  // keeps taking its share of the queue and drops it on the floor
-  test("lets go of the queue when the http client goes away".fail) {
+  test("lets go of the queue when the http client goes away") {
     val q   = queue()
     val run = uniq("run")
     publish(q, 0, run)
     val got = await(collect(Gateway.ndjson(consumer, "/" + opts("queue" -> q)), take = 1))
     assertEquals(numbers(got), Seq(0))
     eventually("no consumer left on the queue", 10.seconds)(channel.consumerCount(q) == 0L)
+  }
+
+  test("a publish no queue gets is reported, not lost in silence") {
+    val (status, lines) = Gateway.post(ingester, "/" + opts("queue" -> uniq("nowhere")), Json.stringify(message(0, uniq("run"))))
+    assertEquals(status, 200, lines.toString)
+    assertEquals((lines.head \ "published").asOpt[Boolean], Some(false), lines.toString)
+    assert((lines.head \ "error_description").as[String].contains("no queue got the message"), lines.toString)
+  }
+
+  test("consuming a queue that does not exist answers 502") {
+    val res = await(Gateway.request(consumer, path = "/" + opts("queue" -> uniq("nowhere"))))
+    val body = await(res.entity.toStrict(10.seconds)).data.utf8String
+    assertEquals(res.status.intValue(), 502, body)
+    assert(body.contains("consume_error"), body)
+  }
+
+  // `take` on the gateway's side: the events that went out are the ones acked
+  test("at least once: what was not acked goes back to the queue, for the next subscriber") {
+    val q     = queue()
+    val run   = uniq("run")
+    (0 until 3).foreach(n => publish(q, n, run))
+    val first = await(collect(Gateway.ndjson(consumer, "/" + opts("queue" -> q, "delivery" -> "at-least-once", "take" -> 1)), take = 1))
+    assertEquals(numbers(first), Seq(0))
+    eventually("no consumer left on the queue")(channel.consumerCount(q) == 0L)
+    val rest  = await(collect(Gateway.ndjson(consumer, "/" + opts("queue" -> q, "delivery" -> "at-least-once", "take" -> 2)), take = 2))
+    assertEquals(numbers(rest).sorted, Seq(1, 2))
+    assert(rest.forall(e => (e \ "vendor_metadata" \ "redelivered").as[String] == "true"), rest.toString)
+  }
+
+  test("through an exchange: every subscriber gets every message") {
+    val exchange = uniq("exchange")
+    channel.exchangeDeclare(exchange, "direct", false, true, null)
+    val run      = uniq("run")
+    val path     = "/" + opts("exchange" -> exchange, "routing_key" -> "orders")
+    val one      = collect(Gateway.ndjson(consumer, path), take = 3)
+    val other    = collect(Gateway.ndjson(consumer, path), take = 3)
+    // the queues of the subscribers are bound once their response starts: keep publishing until both have their share
+    keepPublishing(one.zip(other))(n => Gateway.post(ingester, path, Json.stringify(message(n, run))))
+    assertConsecutive(numbers(await(one)), 3)
+    assertConsecutive(numbers(await(other)), 3)
+  }
+
+  test("a group is refused: the consumers of a queue already share it") {
+    val res = await(Gateway.request(consumer, path = "/" + opts("queue" -> queue(), "group" -> "g")))
+    val body = await(res.entity.toStrict(10.seconds)).data.utf8String
+    assertEquals(res.status.intValue(), 400, body)
+    assert(body.contains("no consumer groups"), body)
   }
 }

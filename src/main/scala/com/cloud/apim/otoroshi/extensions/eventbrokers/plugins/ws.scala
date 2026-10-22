@@ -1,7 +1,8 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
-import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{ClientLease, EventWrapper, Unavailability}
+import org.apache.pekko.stream.Materializer
+import org.apache.pekko.stream.scaladsl.{Flow, Keep, Sink, Source}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ClientLease, EventWrapper, PublishResult, Unavailability}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
@@ -12,6 +13,7 @@ import play.api.http.websocket.Message
 import play.api.libs.json._
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
 case class IngesterConsumerWebsocketConfig(in: EventBrokerPluginConfig, out: EventBrokerPluginConfig) extends NgPluginConfig {
@@ -85,36 +87,45 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
             val optsIn = PluginUtils.buildOpts(request, config.in.config, config.in.includeQuery, config.in.includeHeaders)
             val optsOut = PluginUtils.buildOpts(request, config.out.config, config.out.includeQuery, config.out.includeHeaders)
             val contentTypeOpt = optsIn.select("content-type").asOpt[String]
-            val outSource: Either[Throwable, Source[Message, ?]] = leaseOut match {
-              case None => Right(Source.empty)
-              case Some(lease) => {
-                val enriched = optsOut.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-                Try(lease.client.consume(optsOut)).toEither.map(events => lease.releasing(events.map(w => w.wsMessage(enriched)).withStreamOptions(optsOut)))
-              }
+            def releaseAll(): Unit = {
+              leaseIn.foreach(_.release())
+              leaseOut.foreach(_.release())
             }
-            outSource match {
-              case Left(e) =>
-                leaseIn.foreach(_.release())
-                leaseOut.foreach(_.release())
-                PluginUtils.consumeError(e).leftf
+            val outSource: Future[Either[NgProxyEngineError, Source[Message, ?]]] = leaseOut match {
+              case None => Future.successful(Right(Source.empty))
+              case Some(lease) =>
+                val enriched = optsOut.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
+                PluginUtils.subscribe(lease.client, optsOut).map(_.map(events => lease.releasing(PluginUtils.handOver(events)(w => w.wsMessage(enriched)).withStreamOptions(optsOut))))
+            }
+            outSource.map {
+              case Left(error) =>
+                releaseAll()
+                Left(error)
               case Right(out) =>
-                val in = Sink
-                  .foreach[Message] { message =>
-                    WebsocketMessage.PlayMessage(message).bytes()(using env.otoroshiMaterializer, env.otoroshiExecutionContext).map { data =>
-                      val event = contentTypeOpt match {
-                        case Some("application/vnd.cloud-apim-event-broker+json") => EventWrapper.fromJson(data.utf8String.parseJson)
-                        case Some("application/json") => EventWrapper(None, data, "text", "json", Map.empty, Map.empty)
-                        case Some("text/plain") => EventWrapper(None, data, "text", "text", Map.empty, Map.empty)
-                        case _ => EventWrapper(None, data, "text", "binary", Map.empty, Map.empty)
-                      }
-                      leaseIn.foreach(lease => lease.client.publish(event, optsIn, contentTypeOpt.getOrElse("application/vnd.cloud-apim-event-broker+json")))
+                given Materializer = env.otoroshiMaterializer
+                // one message at a time: a client sending faster than the broker takes waits for it
+                val in = Flow[Message]
+                  .mapAsync(1)(message => WebsocketMessage.PlayMessage(message).bytes())
+                  .map { data =>
+                    contentTypeOpt match {
+                      case Some("application/vnd.cloud-apim-event-broker+json") => EventWrapper.fromJson(data.utf8String.parseJson)
+                      case Some("application/json") => EventWrapper(None, data, "text", "json", Map.empty, Map.empty)
+                      case Some("text/plain") => EventWrapper(None, data, "text", "text", Map.empty, Map.empty)
+                      case _ => EventWrapper(None, data, "text", "binary", Map.empty, Map.empty)
                     }
                   }
+                  .mapAsync(1) { event =>
+                    leaseIn match {
+                      case None => Future.successful(Seq.empty)
+                      case Some(lease) => lease.client.publish(Seq(event), optsIn).recover { case NonFatal(e) => Seq(PublishResult.failed(e)) }
+                    }
+                  }
+                  .toMat(Sink.ignore)(Keep.right)
                   .mapMaterializedValue { done =>
                     done.onComplete(_ => leaseIn.foreach(_.release()))
                     done
                   }
-                Flow.fromSinkAndSource[Message, Message](in, out).rightf
+                Right(Flow.fromSinkAndSource[Message, Message](in, out))
             }
           }
         }

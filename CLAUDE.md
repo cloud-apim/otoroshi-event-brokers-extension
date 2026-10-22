@@ -51,13 +51,24 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and
   `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **api.scala** - `EventWrapper`, the broker-neutral event (key, data, content types, headers, vendor
-  metadata) with its JSON / SSE / websocket serializations, and the `EventBrokerClient` trait. A client
-  must not touch the network in its constructor: `start` / `healthcheck` / `close` run on the
-  manager's blocking pool, bounded by timeouts
+  metadata) with its JSON / SSE / websocket serializations, and the `EventBrokerClient` contract:
+  - a client must not touch the network in its constructor: `start` / `healthcheck` / `close` run on
+    the manager's io pool, bounded by timeouts. `BlockingIo` keeps that pool for the library calls that
+    block (Kafka `send`, RabbitMQ publishes, Paho)
+  - `publish(events, opts)`: one `PublishResult` per event, in order; a refused event is a failed
+    result, never a failed future
+  - `subscribe(spec)`: a `Future[Source[ReceivedEvent, ?]]` that fails before anything streams when
+    the subscription cannot be opened (`IllegalArgumentException` = the call's fault, 400; anything
+    else = the broker's, 502). Wrap the source with `Subscribed(source)(release)`: it releases on
+    termination, and if the source is never run. `ReceivedEvent.ack()` is called by the plugins as the
+    event is handed over (`PluginUtils.handOver`)
+  - `capabilities` (acks, groups, replay, keys, headers): `PluginUtils.subscribe` refuses a spec the
+    broker cannot serve. Keep them and the readme's table in sync
 - **clients/** - one `EventBrokerClient` per broker kind
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
-  `IngesterConsumerWebsocket` (ws.scala); utils.scala holds the shared plugin config and the per-call
-  options read from `x-ca-event-broker-opts-*` query params and headers
+  `IngesterConsumerWebsocket` (ws.scala); utils.scala holds the shared plugin config, the per-call
+  options read from `x-ca-event-broker-opts-*` query params and headers, `subscriptionSpec` (options
+  to `SubscriptionSpec`), `subscribe`, `handOver` and `publishAll` (batches of 100 / 10 ms)
 - **src/main/resources/cloudapim/extensions/event-brokers/** - backoffice page (plain JS, no build) and icon
 
 Source paths don't always match packages: the extension entry point and the plugins are declared in

@@ -7,6 +7,8 @@ import scala.concurrent.duration.*
 
 class MqttSuite extends BrokerSuite {
 
+  import Gateway.given
+
   override def startBroker(): Unit = { Brokers.mosquitto; () }
 
   lazy val connection: String = Gateway.createConnection(
@@ -62,5 +64,22 @@ class MqttSuite extends BrokerSuite {
     val received = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic)), take = 1, within = 10.seconds))
     assertEquals(numbers(received), Seq(0))
     Gateway.deleteConnection(retaining)
+  }
+
+  test("two subscribers of a topic both get every message, and one leaving does not cut the other") {
+    val topic = uniq("shared")
+    val run   = uniq("run")
+    val path  = "/" + opts("topic" -> topic)
+    val short = collect(Gateway.ndjson(consumer, path), take = 2)
+    val long  = collect(Gateway.ndjson(consumer, path), take = 6)
+    keepPublishing(short.zip(long))(n => publish(topic, n, run))
+    assertConsecutive(numbers(await(short)), 2)
+    assertConsecutive(numbers(await(long)), 6)
+  }
+
+  test("a group is refused") {
+    val res  = await(Gateway.request(consumer, path = "/" + opts("topic" -> uniq("group"), "group" -> "g")))
+    val body = await(res.entity.toStrict(10.seconds)).data.utf8String
+    assertEquals(res.status.intValue(), 400, body)
   }
 }
