@@ -143,7 +143,7 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
                     leaseIn match {
                       case None => Future.unit
                       case Some(lease) =>
-                        val brokerMessage = CloudEventBindings.toMessage(outgoing.event, lease.client.config.kind, outgoing.routing)
+                        val brokerMessage = CloudEventBindings.toMessage(outgoing.event, lease.client.config.kind, outgoing.routing, lease.client.capabilities.headers)
                         lease.client
                           .publish(Seq(brokerMessage), optsIn)
                           .recover { case NonFatal(e) => Seq(PublishResult.failed(e)) }

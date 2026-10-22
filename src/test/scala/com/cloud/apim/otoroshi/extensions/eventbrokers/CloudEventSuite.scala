@@ -120,9 +120,19 @@ class CloudEventSuite extends munit.FunSuite {
     assertEquals(back.copy(extensions = back.extensions -- Seq("rabbitmqcontenttype", "rabbitmqroutingkey", "partitionkey")), event.copy(extensions = event.extensions - "partitionkey"))
   }
 
-  test("redis and mqtt: structured mode, the whole event in the payload") {
+  test("mqtt 5: binary mode, the attributes as user properties, the content type as the mqtt 5 one") {
+    val message = CloudEventBindings.toMessage(event, EventBrokerConnectionKind.MQTT, Map("topic" -> "t"), headers = true)
+    assertEquals(message.headers.get("id"), Some("e1"))
+    assertEquals(message.headers.get("specversion"), Some("1.0"))
+    assertEquals(message.headers.get("content-type"), None)
+    assertEquals(message.metadata, Map("topic" -> "t", "content_type" -> "application/json"))
+    val back    = CloudEventBindings.fromMessage(message.copy(metadata = Map("content_type" -> "application/json", "topic" -> "t")), EventBrokerConnectionKind.MQTT)
+    assertEquals(back.copy(extensions = back.extensions -- Seq("mqttcontenttype", "mqtttopic")), event)
+  }
+
+  test("redis and mqtt 3.1.1: structured mode, the whole event in the payload") {
     Seq(EventBrokerConnectionKind.Redis, EventBrokerConnectionKind.MQTT).foreach { kind =>
-      val message = CloudEventBindings.toMessage(event, kind)
+      val message = CloudEventBindings.toMessage(event, kind, headers = false)
       assertEquals(message.headers, Map.empty[String, String])
       assertEquals(CloudEvent.read(Json.parse(message.data.toArray)), Right(event))
       val back    = roundTrip(kind, Map("channel" -> "c", "topic" -> "t"))

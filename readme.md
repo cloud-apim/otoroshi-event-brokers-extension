@@ -18,7 +18,7 @@ events, or over a websocket. The brokers stay private, Otoroshi handles who may 
 | `rabbitmq` | RabbitMQ (AMQP 0.9.1)           | amqp-client 5                   |
 | `pulsar`   | Apache Pulsar                   | pulsar4s (otoroshi)             |
 | `redis`    | Redis pub/sub                   | lettuce (otoroshi)              |
-| `mqtt`     | any MQTT 3.1.1 broker           | eclipse paho                    |
+| `mqtt`     | any MQTT 5 or 3.1.1 broker, over tcp or websockets | HiveMQ MQTT client      |
 
 ### Plugins
 
@@ -78,6 +78,7 @@ option), `com.cloud-apim.event-brokers.event` as `type` (or the `type` option), 
 | Kafka | binary | `ce_*` headers, the data as the value, `content-type` header, `partitionkey` as the record key |
 | Pulsar | binary | `ce_*` properties, the data as the payload, `partitionkey` as the message key |
 | RabbitMQ | binary | `cloudEvents:*` application properties, the amqp `content-type` |
+| MQTT 5 | binary | user properties (no prefix), the mqtt 5 content type |
 | Redis, MQTT 3.1.1 | structured | no headers: the whole event as JSON in the payload |
 
 So a consumer outside Otoroshi (a Kafka consumer, a CloudEvents SDK) reads what the gateway publishes,
@@ -86,7 +87,7 @@ has one (`<topic>-<partition>-<offset>` on Kafka), its `source` `/<kind>/<topic>
 `com.cloud-apim.event-brokers.message`, its content type guessed from the payload when nothing says it.
 Every event read carries what the broker says of the message as extensions: `kafkatopic`,
 `kafkapartition`, `kafkaoffset`, `rabbitmqroutingkey`, `rabbitmqredelivered`, `pulsarmessageid`,
-`redischannel`, `mqtttopic`, ...
+`redischannel`, `mqtttopic`, `mqttqos`, ...
 
 **What the consumers give**: the structured events (`format=cloudevents`, the default), or their data
 alone (`format=raw`).
@@ -134,7 +135,7 @@ What each broker can do (anything else is refused with a `400`):
 |   | Kafka | RabbitMQ | Pulsar | Redis | MQTT |
 |---|---|---|---|---|---|
 | without a group | a consumer group of its own: every event | consumers of a queue share it; `exchange` + `routing_key`: a queue of its own, every message | a non durable subscription of its own: every message | every message | every message |
-| `group` | consumer group | no (a queue already is one) | durable subscription, shared (`subscription_type`: `exclusive`, `shared`, `failover`, `key_shared`) | no | no |
+| `group` | consumer group | no (a queue already is one) | durable subscription, shared (`subscription_type`: `exclusive`, `shared`, `failover`, `key_shared`) | no | MQTT 5: a shared subscription (`$share/<group>/<topic>`) |
 | `at-least-once` | commits what was handed over | acks, the rest goes back to the queue | acks, the rest is delivered again | no | no |
 | `from` / replay | `earliest`, `from_timestamp`, `offset_from` | no | `earliest` (new group), `from_timestamp` | no | no |
 
@@ -354,6 +355,10 @@ raw Kafka client properties, applied last.
 {
   "host": "mosquitto",
   "port": 1883,
+  "version": 5,
+  "transport": "tcp",
+  "websocket_path": "/mqtt",
+  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true },
   "client_id_prefix": "otoroshi",
   "username": null,
   "password": null,
@@ -361,12 +366,15 @@ raw Kafka client properties, applied last.
   "default_qos": 0,
   "retain": false,
   "clean_session": true,
+  "session_expiry_seconds": 0,
   "connection_timeout_seconds": 10,
   "keep_alive_seconds": 60
 }
 ```
 
-Every client gets its own id, the prefix and a random suffix: two nodes of a cluster never share one
+`version` is `5` or `3` (MQTT 3.1.1, no properties, no shared subscriptions). `transport` is `tcp` or
+`websocket`. A clean session loses its subscriptions with its connection: they are made again once the
+client is connected again. Every client gets its own id, the prefix and a random suffix: two nodes of a cluster never share one
 (a broker drops the older of two clients with the same id).
 
 </details>
@@ -384,6 +392,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `it.PolicySuite`                         | what a caller may ask under the configuration of its plugin, against Kafka | docker  |
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.MqttSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
+| `it.MqttReconnectSuite`                  | the mqtt client alone, against a mosquitto restarted on the same port | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip
 themselves when no docker daemon is reachable. Each test publishes and consumes through real

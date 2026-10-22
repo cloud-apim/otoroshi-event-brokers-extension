@@ -51,6 +51,20 @@ object Brokers {
     container
   }
 
+  /** mosquitto with a websocket listener too */
+  lazy val mosquittoWs: Container = {
+    val container = new Container("eclipse-mosquitto:2.0.21")
+    container.withCopyToContainer(
+      org.testcontainers.images.builder.Transferable.of("listener 1883\nallow_anonymous true\nlistener 9001\nprotocol websockets\n"),
+      "/mosquitto/config/mosquitto.conf"
+    )
+    container.withCommand("mosquitto", "-c", "/mosquitto/config/mosquitto.conf")
+    container.withExposedPorts(1883, 9001)
+    container.waitingFor(Wait.forLogMessage(".*mosquitto version .* running.*", 1))
+    container.start()
+    container
+  }
+
   def redisUri: String     = s"redis://${redis.getHost}:${redis.getMappedPort(6379)}"
   def mosquittoPort: Int   = mosquitto.getMappedPort(1883)
 }

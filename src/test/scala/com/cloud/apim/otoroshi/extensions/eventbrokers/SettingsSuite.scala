@@ -112,6 +112,11 @@ class SettingsSuite extends munit.FunSuite {
     assertError(MQTT, Json.obj("host" -> "m", "port" -> 0), "port: must be between 1 and 65535")
     assertError(MQTT, Json.obj("host" -> "m", "default_qos" -> 3), "default_qos: must be between 0 and 2")
     assertError(MQTT, Json.obj("host" -> "m", "client_id_prefix" -> "a-much-too-long-prefix"), "client_id_prefix: at most 14")
+    assertError(MQTT, Json.obj("host" -> "m", "version" -> 4), "version: must be 3 (mqtt 3.1.1) or 5")
+    assertError(MQTT, Json.obj("host" -> "m", "version" -> 3, "session_expiry_seconds" -> 60), "session_expiry_seconds: is an mqtt 5 setting")
+    assertError(MQTT, Json.obj("host" -> "m", "transport" -> "quic"), "transport: must be one of tcp, websocket")
+    assertError(MQTT, Json.obj("host" -> "m", "websocket_path" -> "mqtt"), "websocket_path: must start with /")
+    assertEquals(MqttSettings(host = "m").version, 5)
   }
 
   test("values that come from a vault are only checked once resolved") {

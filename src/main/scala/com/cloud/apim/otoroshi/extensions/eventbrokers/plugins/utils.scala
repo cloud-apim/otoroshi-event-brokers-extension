@@ -280,7 +280,7 @@ object PluginUtils {
       .groupedWithin(100, 10.millis)
       .mapAsync(1) { batch =>
         val valid     = batch.collect { case Right(outgoing) => outgoing }
-        val messages  = valid.map(o => CloudEventBindings.toMessage(o.event, client.config.kind, o.routing))
+        val messages  = valid.map(o => CloudEventBindings.toMessage(o.event, client.config.kind, o.routing, client.capabilities.headers))
         val published =
           if (messages.isEmpty) Future.successful(Seq.empty[PublishResult])
           else Future.fromTry(Try(client.publish(messages, opts))).flatten.recover { case NonFatal(e) => messages.map(_ => PublishResult.failed(e)) }

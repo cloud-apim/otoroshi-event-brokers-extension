@@ -23,7 +23,8 @@ sbt assembly                               # target/scala-3.8.4/otoroshi-extensi
 docker compose up -d                       # every broker on its default port, for manual testing
 ```
 
-The released jar is the **assembly**: amqp-client and paho are shipped in it, while the Kafka
+The released jar is the **assembly**: amqp-client and the shaded HiveMQ mqtt client (with rxjava2) are
+shipped in it, while the Kafka
 (pekko-connectors-kafka), Pulsar (pulsar4s) and Redis (lettuce) clients come from Otoroshi's classpath.
 
 ## Architecture
@@ -59,7 +60,7 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   routing hints going out, what the broker says coming in), and the `EventBrokerClient` contract:
   - a client must not touch the network in its constructor: `start` / `healthcheck` / `close` run on
     the manager's io pool, bounded by timeouts. `BlockingIo` keeps that pool for the library calls that
-    block (Kafka `send`, RabbitMQ publishes, Paho)
+    block (Kafka `send`, RabbitMQ publishes)
   - `publish(events, opts)`: one `PublishResult` per event, in order; a refused event is a failed
     result, never a failed future
   - `subscribe(spec)`: a `Future[Source[ReceivedEvent, ?]]` that fails before anything streams when
