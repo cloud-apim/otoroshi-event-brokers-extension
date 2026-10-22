@@ -20,7 +20,10 @@ class KafkaSuite extends BrokerSuite {
   lazy val ingester           = Gateway.brokerRoute[HttpEventsIngester](connection)
   lazy val consumer           = Gateway.brokerRoute[HttpEventsConsumer](connection)
   lazy val sse                = Gateway.brokerRoute[SseEventConsumer](connection)
-  lazy val websocket          = Gateway.brokerRoute[IngesterConsumerWebsocket](connection, Json.obj("in" -> Json.obj("ref" -> connection), "out" -> Json.obj("ref" -> connection)))
+  lazy val websocket          = Gateway.brokerRoute[IngesterConsumerWebsocket](
+    connection,
+    Json.obj("in" -> (Json.obj("ref" -> connection) ++ Gateway.everythingAllowed), "out" -> (Json.obj("ref" -> connection) ++ Gateway.everythingAllowed))
+  )
 
   def createTopic(name: String, partitions: Int): Unit = {
     val props = new Properties()
@@ -288,5 +291,39 @@ class KafkaSuite extends BrokerSuite {
     val beats = await(collect(Gateway.sse(sse, "/" + opts("topic" -> uniq("quiet"), "heartbeat" -> 200)), take = 2, within = 5.seconds))
     assertEquals(beats.size, 2, beats.toString)
     assert(beats.forall(_.lines.forall(_.startsWith(":"))), beats.toString)
+  }
+
+  test("websocket, acks=client: only what the client acked is committed, the rest comes back") {
+    val topic   = uniq("ws-acks")
+    val group   = uniq("group")
+    val run     = uniq("run")
+    (0 until 3).foreach(n => publish(topic, n, run))
+    val path    = "/" + opts("topic" -> topic, "group" -> group, "from" -> "earliest", "delivery" -> "at-least-once", "acks" -> "client", "max_in_flight" -> 1)
+    val first   = Gateway.websocketSession(websocket, path)
+    val zero    = Json.parse(first.next().get)
+    assertEquals(numbers(Seq(zero)), Seq(0))
+    // one in flight: nothing else comes before the ack
+    assertEquals(first.next(1.second), None)
+    first.send(Json.stringify(Json.obj("ack" -> (zero \ "id").as[String])))
+    val one     = Json.parse(first.next().get)
+    assertEquals(numbers(Seq(one)), Seq(1))
+    first.close()
+    eventually("the acked offset committed")(committed(group, topic) == 1L)
+    val second  = Gateway.websocketSession(websocket, path)
+    assertEquals(numbers(Seq(Json.parse(second.next().get))), Seq(1))
+    second.close()
+  }
+
+  test("websocket, publish_results: every publish is answered") {
+    val topic   = uniq("ws-results")
+    val route   = Gateway.brokerRoute[IngesterConsumerWebsocket](connection, Json.obj("in" -> (Json.obj("ref" -> connection) ++ Gateway.everythingAllowed)))
+    val session = Gateway.websocketSession(route, "/" + opts("topic" -> topic, "publish_results" -> true, "content-type" -> "application/json"))
+    session.send(Json.stringify(message(0, "r")))
+    session.send(Json.stringify(Json.obj("specversion" -> "1.0", "id" -> "ws-1", "source" -> "/ws", "type" -> "t", "data" -> message(1, "r"))))
+    val results = Seq(session.next(), session.next()).flatten.map(Json.parse)
+    session.close()
+    assertEquals(results.map(r => (r \ "published").as[Boolean]), Seq(true, true), results.toString)
+    assertEquals((results(1) \ "id").as[String], "ws-1")
+    assertEquals(results.map(r => (r \ "details" \ "offset").as[Long]), Seq(0L, 1L))
   }
 }

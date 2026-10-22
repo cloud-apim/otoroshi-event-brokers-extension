@@ -44,8 +44,7 @@ class SseEventConsumer extends NgBackendCall {
       case None => Left(PluginUtils.extensionNotAvailable).vfuture
       case Some(extension) => extension.connections.acquire(config.ref) match {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
-        case Right(lease) => {
-          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+        case Right(lease) => PluginUtils.withOptions(config, ctx.request, ctx.attrs, lease) { opts =>
           val kind = lease.client.config.kind
           // what a client reconnecting got last: kafka resumes right after it
           val lastEventId = ctx.request.headers.collectFirst { case (name, value) if name.equalsIgnoreCase("last-event-id") => value }

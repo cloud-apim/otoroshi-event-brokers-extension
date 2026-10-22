@@ -73,9 +73,13 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
   `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
   them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka positions
-  for `Last-Event-ID` resume); utils.scala holds the shared plugin config, the per-call
-  options read from `x-ca-event-broker-opts-*` query params and headers, `subscriptionSpec` (options
-  to `SubscriptionSpec`), `subscribe`, `handOver` and `publishAll` (batches of 100 / 10 ms)
+  for `Last-Event-ID` resume); utils.scala holds the shared plugin config
+  (`EventBrokerPluginConfig`: `options` fixed by the route and evaluated with the expression language,
+  `allowed_overrides`, `allowed_topics`), `CallOptions` (the policy: a caller option not allowed is a
+  400, caller values are never evaluated, per-event routing is checked too), `subscriptionSpec`
+  (options to `SubscriptionSpec`), `subscribe`, `handOver` and `publishAll` (batches of 100 / 10 ms).
+  ws.scala holds `InFlight`, the client acks of the websocket (`acks=client`, `max_in_flight`).
+  Test routes allow every option (`Gateway.everythingAllowed`); `PolicySuite` tests the policy
 - **src/main/resources/cloudapim/extensions/event-brokers/** - backoffice page (plain JS, no build) and icon
 
 Source paths don't always match packages: the extension entry point and the plugins are declared in

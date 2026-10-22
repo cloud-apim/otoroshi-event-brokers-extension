@@ -246,8 +246,11 @@ object Gateway {
     route
   }
 
+  /** what the suites need: the caller may set every option (the policy has a suite of its own) */
+  val everythingAllowed: JsObject = Json.obj("allowed_overrides" -> Json.arr("*"))
+
   /** a route whose only plugin is `P`, bound to the given connection */
-  def brokerRoute[P](connectionId: String, config: JsObject = Json.obj())(using ClassTag[P]): NgRoute =
+  def brokerRoute[P](connectionId: String, config: JsObject = everythingAllowed)(using ClassTag[P]): NgRoute =
     createRoute(
       Seq(
         NgPluginInstance(
@@ -317,6 +320,30 @@ object Gateway {
         acc => Some(Some(acc))
       )
       .collect { case Some(acc) if acc.nonEmpty => SseEvent(acc) }
+
+  /** a websocket kept open: what the gateway sends piles up in `received`, `send` writes to it */
+  final class WebsocketSession(val received: java.util.concurrent.LinkedBlockingQueue[String], outgoing: org.apache.pekko.stream.BoundedSourceQueue[Message]) {
+    def send(text: String): Unit = { outgoing.offer(TextMessage(text)); () }
+    def next(timeout: FiniteDuration = 10.seconds): Option[String] = Option(received.poll(timeout.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
+    def close(): Unit = outgoing.complete()
+  }
+
+  def websocketSession(route: NgRoute, path: String): WebsocketSession = {
+    val received        = new java.util.concurrent.LinkedBlockingQueue[String]()
+    val (outgoing, out) = Source.queue[Message](64).preMaterialize()
+    val in              = Flow[Message]
+      .mapAsync(1) {
+        case m: TextMessage   => m.toStrict(10.seconds).map(_.text)
+        case m: BinaryMessage => m.toStrict(10.seconds).map(_.data.utf8String)
+      }
+      .to(Sink.foreach(text => { received.add(text); () }))
+    val (upgrade, _)    = Http().singleWebSocketRequest(
+      WebSocketRequest(uri = s"ws://127.0.0.1:$port$path", extraHeaders = Seq(Host(route.frontend.domains.head.domain))),
+      Flow.fromSinkAndSourceMat(in, out)(Keep.none)
+    )
+    await(upgrade)
+    new WebsocketSession(received, outgoing)
+  }
 
   /**
    * Opens a websocket on the route, sends `out`, keeps the socket open and collects the first `take`

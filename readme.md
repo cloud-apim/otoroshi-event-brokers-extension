@@ -29,8 +29,30 @@ events, or over a websocket. The brokers stay private, Otoroshi handles who may 
 | Cloud APIM - SSE events consumer            | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.SseEventConsumer`          | streams events as server-sent events                  |
 | Cloud APIM - Websocket Ingester/Consumer    | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.IngesterConsumerWebsocket` | publishes incoming frames, streams events back        |
 
-Every plugin points to an **event broker connection**. Per-call options are read from query parameters
-and headers prefixed with `x-ca-event-broker-opts-` (`?x-ca-event-broker-opts-topic=orders`).
+Every plugin points to an **event broker connection**, and decides what its callers may ask:
+
+```json
+{
+  "ref": "connection_...",
+  "options": { "topic": "orders-${apikey.metadata.tenant}", "group": "billing" },
+  "allowed_overrides": ["take", "drop", "duration", "format", "heartbeat"],
+  "allowed_topics": [],
+  "include_query": true,
+  "include_headers": true
+}
+```
+
+- `options` are what the route fixes: the options below, the topic first. Their values may hold
+  Otoroshi [expressions](https://www.otoroshi.io/docs/topics/expression-language) (`${apikey.metadata.tenant}`,
+  `${req.headers.x-tenant}`, `${user.email}`), evaluated for each call.
+- A caller sets options with query parameters and headers prefixed with `x-ca-event-broker-opts-`
+  (`?x-ca-event-broker-opts-take=10`), but **only those in `allowed_overrides`**: anything else is refused
+  with a `400`. By default a caller can only shape its own response (`take`, `drop`, `duration`,
+  `format`, `heartbeat`); the topic, the group, the start position, the delivery stay the route's.
+  `["*"]` allows everything. What a caller sends is never evaluated as an expression.
+- When the caller may name the topic (queue, channel), `allowed_topics` holds the glob patterns it must
+  match (`["orders-*"]`); empty, any.
+- Where an event says it goes (the `vendor_metadata` of the legacy format) is held to the same rules.
 
 ### Events are CloudEvents
 
@@ -126,6 +148,13 @@ empty line when nothing happens. The **SSE consumer**:
 - gives each event an `id:`. On Kafka it holds the positions read on every partition: a client coming
   back with it in `Last-Event-ID` (what `EventSource` does by itself) resumes right after what it got
 - answers with `Cache-Control: no-cache` and `X-Accel-Buffering: no`, so that no proxy holds the events
+
+The **websocket plugin** has an `in` and an `out` configuration (either can be left without a `ref`):
+frames sent by the client are published one at a time (a text frame holding a structured CloudEvent is
+that event), events consumed are sent as frames. With `acks=client` (on `out`), an event is acked only
+when the client answers `{"ack": "<event id>"}` (or a list of ids), and no more than `max_in_flight`
+(100) wait for their ack: with `delivery=at-least-once`, what the client did not ack is delivered again.
+With `publish_results=true` (on `in`), every frame published is answered with its result.
 
 ### Connections
 
@@ -352,6 +381,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `CloudEventSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite`, `SettingsSuite` | the code alone | nothing |
 | `it.ConnectionManagerSuite`              | the connection lifecycle over fake brokers, on the env of an Otoroshi in the test jvm | nothing |
 | `it.ConnectionsApiSuite`                 | what the admin api accepts as connections, on an Otoroshi in the test jvm | nothing |
+| `it.PolicySuite`                         | what a caller may ask under the configuration of its plugin, against Kafka | docker  |
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.MqttSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
 
