@@ -2,7 +2,6 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import org.apache.pekko.stream.Materializer
 import com.cloud.apim.otoroshi.extensions.eventbrokers.CloudEventBindings
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnectionKind
 import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, Output, OutputFormat, PluginUtils, SseIds, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
@@ -46,8 +45,10 @@ class SseEventConsumer extends NgBackendCall {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
         case Right(lease) => PluginUtils.withOptions(config, ctx.request, ctx.attrs, lease) { opts =>
           val kind = lease.client.config.kind
-          // what a client reconnecting got last: kafka resumes right after it
-          val lastEventId = ctx.request.headers.collectFirst { case (name, value) if name.equalsIgnoreCase("last-event-id") => value }
+          // what a client reconnecting got last: a broker that can replay resumes right after it
+          val lastEventId = ctx.request.headers
+            .collectFirst { case (name, value) if name.equalsIgnoreCase("last-event-id") => value }
+            .filter(_ => lease.client.capabilities.replay)
           OutputFormat.from(opts) match {
             case Left(error) =>
               lease.release()
@@ -58,12 +59,12 @@ class SseEventConsumer extends NgBackendCall {
                   lease.release()
                   Left(error)
                 case Right(events) =>
-                  val resumed   = lastEventId.flatMap(SseIds.readKafka).getOrElse(Map.empty)
+                  val resumed   = lastEventId.flatMap(SseIds.read(kind, _)).getOrElse(Map.empty)
                   val framed    = events.statefulMap(() => resumed)(
                     (positions, received) => {
                       val event = CloudEventBindings.fromMessage(received.message, kind)
-                      val next  = if (kind == EventBrokerConnectionKind.Kafka) SseIds.kafkaPosition(received.message).map(positions + _).getOrElse(positions) else positions
-                      val id    = if (next.nonEmpty) SseIds.kafka(next) else event.id
+                      val next  = SseIds.position(kind, received.message).map(positions + _).getOrElse(positions)
+                      val id    = if (next.nonEmpty) SseIds.token(kind, next) else event.id
                       (next, (received, Output.sse(event, format, id)))
                     },
                     _ => None

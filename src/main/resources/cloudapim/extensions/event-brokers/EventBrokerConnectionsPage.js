@@ -118,7 +118,18 @@ class EventBrokerConnectionsPage extends Component {
     'settings.tls.trust_certs_file_path': input('string', 'Trusted certificates file (pem)'),
     // redis
     'settings.uri': input('string', 'URI', { placeholder: 'redis://host:6379, rediss:// for TLS' }),
+    'settings.mode': input('select', 'Mode', {
+      possibleValues: [
+        { value: 'pubsub', label: 'Pub/Sub (channels)' },
+        { value: 'streams', label: 'Streams (groups, acks, replay)' },
+      ],
+    }),
     'settings.default_channel': input('string', 'Default channel', { help: 'Used when a call names no channel' }),
+    'settings.streams.default_stream': input('string', 'Default stream', { help: 'Used when a call names no stream' }),
+    'settings.streams.max_length': input('number', 'Max length', { help: 'Trims the stream to about that many entries on each publish. 0: no limit' }),
+    'settings.streams.exact_trimming': input('bool', 'Exact trimming', { help: 'Exactly max length entries, at a higher cost' }),
+    'settings.streams.data_field': input('string', 'Data field', { help: 'The field of an entry holding the data, the others are its headers' }),
+    'settings.streams.claim_min_idle_ms': input('number', 'Claim after (ms)', { help: 'An entry left unacked that long by a member of a group goes to another one. 0: never' }),
     'settings.tls.start_tls': input('bool', 'STARTTLS'),
     'settings.tls.verify_peer': input('bool', 'Verify the server certificate'),
     // mqtt
@@ -224,7 +235,14 @@ class EventBrokerConnectionsPage extends Component {
       case 'redis':
         return head.concat([
           'settings.uri',
-          'settings.default_channel',
+          'settings.mode',
+        ], (state.settings && state.settings.mode === 'streams') ? [
+          'settings.streams.default_stream',
+          'settings.streams.max_length',
+          'settings.streams.exact_trimming',
+          'settings.streams.data_field',
+          'settings.streams.claim_min_idle_ms',
+        ] : ['settings.default_channel'], [
           '>>>Authentication',
           'settings.username',
           'settings.password',

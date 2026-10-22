@@ -130,6 +130,18 @@ class CloudEventSuite extends munit.FunSuite {
     assertEquals(back.copy(extensions = back.extensions -- Seq("mqttcontenttype", "mqtttopic")), event)
   }
 
+  test("redis streams: binary mode, the attributes in ce_ fields next to the data") {
+    val message = CloudEventBindings.toMessage(event, EventBrokerConnectionKind.Redis, Map("stream" -> "s"), headers = true)
+    assertEquals(message.headers.get("ce_id"), Some("e1"))
+    assertEquals(message.headers.get("ce_specversion"), Some("1.0"))
+    assertEquals(message.headers.get("content-type"), Some("application/json"))
+    assertEquals(message.data, event.data.get)
+    assertEquals(message.metadata, Map("stream" -> "s"))
+    val back    = CloudEventBindings.fromMessage(message.copy(metadata = Map("stream" -> "s", "id" -> "1792663171364-0")), EventBrokerConnectionKind.Redis)
+    assertEquals(back.copy(extensions = back.extensions -- Seq("redisstream", "redisid")), event)
+    assertEquals(back.extension("redisid"), Some("1792663171364-0"))
+  }
+
   test("redis and mqtt 3.1.1: structured mode, the whole event in the payload") {
     Seq(EventBrokerConnectionKind.Redis, EventBrokerConnectionKind.MQTT).foreach { kind =>
       val message = CloudEventBindings.toMessage(event, kind, headers = false)
@@ -154,6 +166,9 @@ class CloudEventSuite extends munit.FunSuite {
     assertEquals(kafka.extension("kafkaoffset"), Some("7"))
     val text  = CloudEventBindings.fromMessage(BrokerMessage(data = ByteString("hello"), metadata = Map("channel" -> "c")), EventBrokerConnectionKind.Redis)
     assertEquals((text.source, text.datacontenttype), ("/redis/c", Some("text/plain")))
+    // a stream entry: its stream and its id, which starts with the time it was added
+    val entry = CloudEventBindings.fromMessage(BrokerMessage(data = ByteString("hello"), metadata = Map("stream" -> "s", "id" -> "1792663171364-3")), EventBrokerConnectionKind.Redis)
+    assertEquals((entry.id, entry.source, entry.time), ("s-1792663171364-3", "/redis/s", Some(CloudEvent.time(1792663171364L))))
     val bytes = CloudEventBindings.fromMessage(BrokerMessage(data = ByteString(Array[Byte](-1, -2))), EventBrokerConnectionKind.MQTT)
     assertEquals(bytes.datacontenttype, Some("application/octet-stream"))
   }
@@ -170,12 +185,20 @@ class CloudEventSuite extends munit.FunSuite {
     assertEquals(Output.sse(event, OutputFormat.CloudEvents, "x").utf8String.count(_ == '\n'), 4)
   }
 
-  test("sse: kafka ids carry the positions read, and give them back") {
-    val positions = Map("orders:0" -> 4L, "orders:1" -> 9L)
-    assertEquals(SseIds.readKafka(SseIds.kafka(positions)), Some(positions))
-    assertEquals(SseIds.readKafka("e1"), None)
-    assertEquals(SseIds.resume(EventBrokerConnectionKind.Kafka, Some(SseIds.kafka(positions))), Some(StartFrom.Positions(positions)))
-    assertEquals(SseIds.resume(EventBrokerConnectionKind.Redis, Some(SseIds.kafka(positions))), None)
+  test("sse: the ids carry the positions read, and give them back") {
+    import EventBrokerConnectionKind.*
+    val kafka = Map("orders:0" -> "4", "orders:1" -> "9")
+    assertEquals(SseIds.read(Kafka, SseIds.token(Kafka, kafka)), Some(kafka))
+    assertEquals(SseIds.read(Kafka, "e1"), None)
+    assertEquals(SseIds.resume(Kafka, Some(SseIds.token(Kafka, kafka))), Some(StartFrom.Positions(kafka)))
+    // a token is good for the kind of broker it comes from only
+    assertEquals(SseIds.resume(Redis, Some(SseIds.token(Kafka, kafka))), None)
+    val redis = Map("orders" -> "1792663171364-0")
+    assertEquals(SseIds.resume(Redis, Some(SseIds.token(Redis, redis))), Some(StartFrom.Positions(redis)))
+    assertEquals(SseIds.position(Kafka, BrokerMessage(data = ByteString.empty, metadata = Map("topic" -> "t", "partition" -> "1", "offset" -> "8"))), Some("t:1" -> "8"))
+    assertEquals(SseIds.position(Redis, BrokerMessage(data = ByteString.empty, metadata = Map("stream" -> "s", "id" -> "1-2"))), Some("s" -> "1-2"))
+    // pub/sub has no position
+    assertEquals(SseIds.position(Redis, BrokerMessage(data = ByteString.empty, metadata = Map("channel" -> "c"))), None)
   }
 
   test("the output formats") {

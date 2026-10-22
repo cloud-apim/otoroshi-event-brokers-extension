@@ -204,7 +204,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
       // resuming: right after the positions given, the partitions they do not name from now on
       case StartFrom.Positions(positions) =>
         val resumeAt = (assigned: Set[TopicPartition]) =>
-          Future.successful(assigned.flatMap(tp => positions.get(s"${tp.topic()}:${tp.partition()}").map(offset => tp -> (offset + 1L))).toMap)
+          Future.successful(assigned.flatMap(tp => positions.get(s"${tp.topic()}:${tp.partition()}").flatMap(_.toLongOption).map(offset => tp -> (offset + 1L))).toMap)
         val all      = Subscriptions.topics(topics.toSet)
         Future.successful(spec.delivery match {
           case DeliveryMode.AtMostOnce  =>

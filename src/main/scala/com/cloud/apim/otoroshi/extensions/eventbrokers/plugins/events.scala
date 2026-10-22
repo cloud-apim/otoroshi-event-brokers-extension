@@ -156,31 +156,44 @@ object Output {
 }
 
 /**
- * The `id` of the server-sent events. On kafka, the positions read so far on every partition, so that a
- * client sending it back in `Last-Event-ID` resumes right after them. Elsewhere, the id of the event.
+ * The `id` of the server-sent events. Where the broker can resume from a position (kafka, redis
+ * streams), the positions read so far (on every partition, in every stream), so that a client sending
+ * it back in `Last-Event-ID` resumes right after them. Elsewhere, the id of the event.
  */
 object SseIds {
 
-  private val prefix = "kafka:"
+  private def prefix(kind: EventBrokerConnectionKind): String = s"${kind.name}:"
 
-  def kafka(positions: Map[String, Long]): String =
-    prefix + Base64.getUrlEncoder.withoutPadding().encodeToString(Json.stringify(JsObject(positions.view.mapValues(JsNumber(_)).toMap)).getBytes("UTF-8"))
+  def token(kind: EventBrokerConnectionKind, positions: Map[String, String]): String =
+    prefix(kind) + Base64.getUrlEncoder.withoutPadding().encodeToString(Json.stringify(JsObject(positions.view.mapValues(JsString(_)).toMap)).getBytes("UTF-8"))
 
-  def readKafka(id: String): Option[Map[String, Long]] =
-    Option(id).map(_.trim).filter(_.startsWith(prefix)).flatMap { token =>
-      Try(Json.parse(Base64.getUrlDecoder.decode(token.drop(prefix.length))).as[Map[String, Long]]).toOption
+  def read(kind: EventBrokerConnectionKind, id: String): Option[Map[String, String]] =
+    Option(id).map(_.trim).filter(_.startsWith(prefix(kind))).flatMap { token =>
+      Try(Json.parse(Base64.getUrlDecoder.decode(token.drop(prefix(kind).length))).as[JsObject]).toOption.map { positions =>
+        positions.value.collect {
+          case (name, JsString(position)) => name -> position
+          case (name, JsNumber(position)) => name -> position.toString
+        }.toMap
+      }
     }
 
-  /** the position of a kafka message: `topic:partition` and its offset */
-  def kafkaPosition(message: BrokerMessage): Option[(String, Long)] = for {
-    topic     <- message.metadata.get("topic")
-    partition <- message.metadata.get("partition")
-    offset    <- message.metadata.get("offset").flatMap(_.toLongOption)
-  } yield (s"$topic:$partition", offset)
-
-  /** where to resume from, when the client says where it stopped and the broker can do it */
-  def resume(kind: EventBrokerConnectionKind, lastEventId: Option[String]): Option[StartFrom] = kind match {
-    case EventBrokerConnectionKind.Kafka => lastEventId.flatMap(readKafka).filter(_.nonEmpty).map(StartFrom.Positions(_))
+  /** where a message is: `topic:partition` and its offset on kafka, its stream and its id on redis streams */
+  def position(kind: EventBrokerConnectionKind, message: BrokerMessage): Option[(String, String)] = kind match {
+    case EventBrokerConnectionKind.Kafka =>
+      for {
+        topic     <- message.metadata.get("topic")
+        partition <- message.metadata.get("partition")
+        offset    <- message.metadata.get("offset")
+      } yield (s"$topic:$partition", offset)
+    case EventBrokerConnectionKind.Redis =>
+      for {
+        stream <- message.metadata.get("stream")
+        id     <- message.metadata.get("id")
+      } yield (stream, id)
     case _                               => None
   }
+
+  /** where to resume from, when the client says where it stopped */
+  def resume(kind: EventBrokerConnectionKind, lastEventId: Option[String]): Option[StartFrom] =
+    lastEventId.flatMap(read(kind, _)).filter(_.nonEmpty).map(StartFrom.Positions(_))
 }
