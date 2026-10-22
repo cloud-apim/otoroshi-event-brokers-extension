@@ -12,8 +12,6 @@ import otoroshi.utils.syntax.implicits._
 import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokersExtensionDatastores, EventBrokersExtensionState}
 import play.api.libs.json._
 
-import scala.collection.concurrent.TrieMap
-import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Success, Try}
 
 enum EventBrokerConnectionKind(val name: String) {
@@ -52,31 +50,17 @@ case class EventBrokerConnection(
 
   def hash: String = s"${id}-${settings.stringify}".sha256
 
+  /** a new client, not started: the ConnectionManager owns its lifecycle */
   def newClientInstance()(using env: Env): EventBrokerClient = kind match {
     case EventBrokerConnectionKind.Kafka => new KafkaBrokerClient(this, env)
-    case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this, env)
+    case EventBrokerConnectionKind.Pulsar => new PulsarBrokerClient(this)
     case EventBrokerConnectionKind.Redis => new RedisBrokerClient(this)
     case EventBrokerConnectionKind.MQTT => new MQTTBrokerClient(this)
     case EventBrokerConnectionKind.RabbitMQ => new RabbitMqBrokerClient(this)
   }
-
-  def client()(using env: Env, ec: ExecutionContext): EventBrokerClient = {
-    val client = EventBrokerConnection.cache.getOrElseUpdate(id, {
-      newClientInstance()
-    })
-    if (client.hash != hash) {
-      val newClient = newClientInstance()
-      EventBrokerConnection.cache.put(id, newClient)
-      client.close()
-      newClient
-    } else {
-      client
-    }
-  }
 }
 
 object EventBrokerConnection {
-  val cache = new TrieMap[String, EventBrokerClient]()
   given format: Format[EventBrokerConnection] = new Format[EventBrokerConnection] {
     override def writes(o: EventBrokerConnection): JsValue             = o.location.jsonWithKey ++ Json.obj(
       "id"          -> o.id,

@@ -4,8 +4,8 @@ import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
-import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultProducerMessage, DefaultPulsarClient, MessageId, ProducerConfig, PulsarClient, PulsarClientConfig, Subscription, Topic, Consumer as PulsarConsumer, Producer as PulsarProducer}
-import org.apache.pulsar.client.api.{Authentication, Schema}
+import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultProducerMessage, DefaultPulsarClient, MessageId, ProducerConfig, PulsarClient, Subscription, Topic, Consumer as PulsarConsumer, Producer as PulsarProducer}
+import org.apache.pulsar.client.api.{Authentication, PulsarClientException, Schema, PulsarClient as JPulsarClient}
 import org.apache.pulsar.client.impl.auth._
 import org.apache.pulsar.client.impl.schema.SchemaInfoImpl
 import org.apache.pulsar.common.schema.{SchemaInfo, SchemaType}
@@ -15,7 +15,10 @@ import otoroshi.utils.http.MtlsConfig
 import otoroshi.utils.syntax.implicits._
 import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 
+import java.util.concurrent.{ExecutionException, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.Try
 
 object PulsarBroker {
 
@@ -32,12 +35,24 @@ object PulsarBroker {
     }
   }
 
-  def client(_env: otoroshi.env.Env, config: PulsarConfig, rawConfig: JsObject): PulsarClient = {
+  /** the native client: pulsar4s wraps it, and the healthcheck needs it */
+  def client(_env: otoroshi.env.Env, config: PulsarConfig, rawConfig: JsObject): JPulsarClient = {
+    // TODO: moare options from config
+    val authOpt: Option[Authentication] = rawConfig.select("auth").asOpt[JsObject].map { obj =>
+      obj.select("kind").asOpt[String].getOrElse("disabled").toLowerCase() match {
+        case "basic" => new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(
+          obj.select("username").as[String],
+          obj.select("password").as[String],
+        ).getCommandData))
+        case "token" => new AuthenticationToken().seffectOn(_.configure(new AuthenticationDataToken(() => obj.select("token").as[String]).getCommandData))
+        case _ => new AuthenticationDisabled()
+      }
+    }
+    val builder = JPulsarClient.builder().serviceUrl(config.uri)
+    authOpt.foreach(builder.authentication)
     if (config.mtlsConfig.mtls) {
       val (_, jks, password) = config.mtlsConfig.toJKS(using _env)
-      val builder = org.apache.pulsar.client.api.PulsarClient
-        .builder()
-        .serviceUrl(config.uri)
+      builder
         .enableTlsHostnameVerification(false)
         .allowTlsInsecureConnection(config.mtlsConfig.trustAll)
         .tlsTrustStoreType("JKS")
@@ -45,26 +60,8 @@ object PulsarBroker {
         .tlsTrustCertsFilePath(jks.getAbsolutePath)
         .useKeyStoreTls(true)
       config.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
-      new DefaultPulsarClient(builder.build())
-    } else {
-      // TODO: moare options from config
-      val authOpt: Option[Authentication] = rawConfig.select("auth").asOpt[JsObject].map { obj =>
-        obj.select("kind").asOpt[String].getOrElse("disabled").toLowerCase() match {
-          case "basic" => new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(
-            obj.select("username").as[String],
-            obj.select("password").as[String],
-          ).getCommandData))
-          case "token" => new AuthenticationToken().seffectOn(_.configure(new AuthenticationDataToken(() => obj.select("token").as[String]).getCommandData))
-          case _ => new AuthenticationDisabled()
-        }
-      }
-      val c = PulsarClientConfig(
-        serviceUrl = config.uri,
-        authentication = authOpt,
-
-      )
-      PulsarClient(c)
     }
+    builder.build()
   }
 
   // TODO: configure based on opts and global config
@@ -82,7 +79,7 @@ object PulsarBroker {
   }
 }
 
-class PulsarBrokerClient(val config: EventBrokerConnection, env: Env) extends EventBrokerClient {
+class PulsarBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
 
   private val pconfig = PulsarConfig.format.reads(config.settings).getOrElse(PulsarConfig( // TODO: handle auth !!!!!
     uri = "pulsar://localhost:6650",
@@ -95,11 +92,33 @@ class PulsarBrokerClient(val config: EventBrokerConnection, env: Env) extends Ev
     username = None,
     password = None,
   ))
-  private val client = PulsarBroker.client(env, pconfig, config.settings)
+  private val nativeRef = new AtomicReference[Option[JPulsarClient]](None)
+  private val clientRef = new AtomicReference[Option[PulsarClient]](None)
 
-  override def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
-    client.close()
-    ().vfuture
+  private def client: PulsarClient = clientRef.get().getOrElse(throw new IllegalStateException("the pulsar client is not started"))
+
+  override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    val native = PulsarBroker.client(env, pconfig, config.settings)
+    nativeRef.set(Some(native))
+    clientRef.set(Some(new DefaultPulsarClient(native)))
+  }.flatMap(_ => healthcheck())
+
+  // building the client connects nothing: looking the default topic up needs the broker (without
+  // creating anything on the way). a topic that does not exist yet is an answer of the broker too
+  override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    try {
+      nativeRef.get().getOrElse(throw new IllegalStateException("the pulsar client is not started"))
+        .getPartitionsForTopic(s"persistent://${pconfig.tenant}/${pconfig.namespace}/${pconfig.topic}", false)
+        .get(10, TimeUnit.SECONDS)
+      ()
+    } catch {
+      case e: ExecutionException if e.getCause.isInstanceOf[PulsarClientException.TopicDoesNotExistException] => ()
+    }
+  }
+
+  override def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    clientRef.set(None)
+    nativeRef.getAndSet(None).foreach(c => Try(c.close()))
   }
 
   def buildProps(wrapper: EventWrapper): Map[String, String] = {

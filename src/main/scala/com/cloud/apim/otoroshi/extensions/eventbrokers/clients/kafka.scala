@@ -2,6 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, DescribeClusterOptions}
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
@@ -21,7 +22,10 @@ import otoroshi.utils.syntax.implicits._
 import play.api.libs.json.{JsObject, JsValue, Json}
 
 import java.util.UUID
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.util.Try
 import scala.util.control.NonFatal
 
 class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends EventBrokerClient {
@@ -42,17 +46,42 @@ class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends Eve
 
   // lazy val logger = play.api.Logger("KafkaBrokerClient")
 
+  // kafkaSettings may block (it waits for the certificates with mtls): only computed in start
+  private lazy val properties: Map[String, String] = kafkaSettings(env, kconfig)
+
   private lazy val producerSettings = ProducerSettings
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
-    .withProperties(kafkaSettings(env, kconfig))
+    .withProperties(properties)
     .withBootstrapServers(kconfig.servers.mkString(","))
 
   private lazy val consumerSettings = ConsumerSettings
     .create(env.analyticsActorSystem, new ByteArrayDeserializer(), new ByteArrayDeserializer())
-    .withProperties(kafkaSettings(env, kconfig))
+    .withProperties(properties)
     .withBootstrapServers(kconfig.servers.mkString(","))
 
-  private lazy val producer: Producer[Array[Byte], Array[Byte]] = producerSettings.createKafkaProducer()
+  private val producerRef = new AtomicReference[Option[Producer[Array[Byte], Array[Byte]]]](None)
+  private val adminRef    = new AtomicReference[Option[Admin]](None)
+
+  private def producer: Producer[Array[Byte], Array[Byte]] =
+    producerRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
+
+  override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    val adminProperties = new java.util.Properties()
+    properties.foreach((k, v) => adminProperties.put(k, v))
+    adminProperties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kconfig.servers.mkString(","))
+    adminRef.set(Some(Admin.create(adminProperties)))
+    producerRef.set(Some(producerSettings.createKafkaProducer()))
+  }.flatMap(_ => healthcheck())
+
+  // the producer connects lazily and silently retries forever: asking the cluster who it is tells
+  // whether the brokers can actually be reached
+  override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    adminRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
+      .describeCluster(new DescribeClusterOptions().timeoutMs(10000))
+      .clusterId()
+      .get(10, TimeUnit.SECONDS)
+    ()
+  }
 
   private def buildHeaders(wrapper: EventWrapper): Headers = {
     val headers = wrapper.headers ++ Map(
@@ -106,9 +135,9 @@ class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends Eve
     }
   }
 
-  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
-    producer.close()
-    ().vfuture
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    producerRef.getAndSet(None).foreach(p => Try(p.close(java.time.Duration.ofSeconds(5))))
+    adminRef.getAndSet(None).foreach(a => Try(a.close(java.time.Duration.ofSeconds(5))))
   }
 
   private def callback(promise: Promise[RecordMetadata]) =

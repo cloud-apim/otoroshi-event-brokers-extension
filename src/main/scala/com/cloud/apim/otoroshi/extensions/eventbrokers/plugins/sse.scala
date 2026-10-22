@@ -11,6 +11,7 @@ import play.api.libs.json._
 import play.api.mvc.Results
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Failure, Success, Try}
 
 class SseEventConsumer extends NgBackendCall {
 
@@ -38,15 +39,20 @@ class SseEventConsumer extends NgBackendCall {
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
-      case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
-      case Some(extension) => extension.states.connection(config.ref) match {
-        case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
-        case Some(connection) => {
-          val client = connection.client()
+      case None => Left(PluginUtils.extensionNotAvailable).vfuture
+      case Some(extension) => extension.connections.acquire(config.ref) match {
+        case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
+        case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          val source = client.consume(opts).map(w => w.sseSerialize(enriched)).withStreamOptions(opts)
-          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("text/event-stream")), None)).vfuture
+          Try(lease.client.consume(opts)) match {
+            case Failure(e) =>
+              lease.release()
+              Left(PluginUtils.consumeError(e)).vfuture
+            case Success(events) =>
+              val source = events.map(w => w.sseSerialize(enriched)).withStreamOptions(opts)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("text/event-stream")), None)).vfuture
+          }
         }
       }
     }

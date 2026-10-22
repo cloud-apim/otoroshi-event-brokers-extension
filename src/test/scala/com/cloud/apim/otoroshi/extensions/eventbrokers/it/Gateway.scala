@@ -1,7 +1,8 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.it
 
+import com.cloud.apim.otoroshi.extensions.eventbrokers.ConnectionState
 import com.typesafe.config.ConfigFactory
-import org.apache.pekko.actor.ActorSystem
+import org.apache.pekko.actor.{Actor, ActorSystem, Props}
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model.*
 import org.apache.pekko.http.scaladsl.model.headers.{Host, RawHeader}
@@ -10,6 +11,7 @@ import org.apache.pekko.stream.Materializer
 import org.apache.pekko.stream.scaladsl.{Flow, Framing, Keep, Sink, Source}
 import org.apache.pekko.util.ByteString
 import otoroshi.api.Otoroshi
+import otoroshi.events.OtoroshiEvent
 import otoroshi.models.{EntityLocation, RoundRobin}
 import otoroshi.next.models.*
 import otoroshi.next.plugins.api.NgPluginHelper
@@ -22,7 +24,9 @@ import play.core.server.ServerConfig
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.reflect.ClassTag
 import scala.util.Try
@@ -62,7 +66,19 @@ object Gateway {
       .parseString(s"""
         |otoroshi.storage = "inmemory"
         |otoroshi.next.state-sync-interval = 500
-        |otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.enabled = true
+        |otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers {
+        |  enabled = true
+        |  # short enough for the suites to watch a broker go away and come back
+        |  connections {
+        |    connect-timeout = 5s
+        |    retry.min-backoff = 200ms
+        |    retry.max-backoff = 2s
+        |    healthcheck.interval = 1s
+        |    healthcheck.timeout = 3s
+        |    healthcheck.max-failures = 2
+        |    retire-grace-period = 2s
+        |  }
+        |}
         |""".stripMargin)
       .resolve()
     val oto    = Otoroshi(
@@ -72,8 +88,24 @@ object Gateway {
     oto.startAndStopOnShutdown()
     waitUntilHealthy(oto)
     liftAddressQuota(oto)
+    listenToEvents(oto)
     oto
   }
+
+  /** every analytics event otoroshi sent since it started, as json, most recent last */
+  val events = new ConcurrentLinkedQueue[JsValue]()
+
+  private def listenToEvents(oto: Otoroshi): Unit = {
+    val env      = oto.env
+    val listener = env.analyticsActorSystem.actorOf(Props(new Actor {
+      def receive: Receive = { case event: OtoroshiEvent => events.add(event.toJson(using env)) }
+    }))
+    env.analyticsActorSystem.eventStream.subscribe(listener, classOf[OtoroshiEvent])
+    ()
+  }
+
+  def eventsOf(connectionId: String): Seq[JsValue] =
+    events.asScala.toSeq.filter(e => (e \ "connection" \ "id").asOpt[String].contains(connectionId))
 
   given system: ActorSystem  = instance.system
   given mat: Materializer    = instance.materializer
@@ -134,30 +166,46 @@ object Gateway {
 
   val connectionsPath = "/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections"
 
-  /** creates a connection and waits until the extension state has picked it up */
-  def createConnection(kind: String, settings: JsObject): String = {
-    val id  = s"connection_${UUID.randomUUID()}"
-    val res = await(
-      admin(connectionsPath).post(
-        Json.stringify(
-          Json.obj(
-            "id"          -> id,
-            "name"        -> s"$kind connection",
-            "description" -> "created by the integration tests",
-            "tags"        -> Json.arr(),
-            "metadata"    -> Json.obj(),
-            "kind"        -> kind,
-            "settings"    -> settings
-          )
-        )
-      )
+  private def connectionJson(id: String, kind: String, settings: JsObject): String = Json.stringify(
+    Json.obj(
+      "id"          -> id,
+      "name"        -> s"$kind connection",
+      "description" -> "created by the integration tests",
+      "tags"        -> Json.arr(),
+      "metadata"    -> Json.obj(),
+      "kind"        -> kind,
+      "settings"    -> settings
     )
+  )
+
+  def connectionState(id: String): Option[ConnectionState] = extension.connections.status(id).map(_.state)
+
+  /**
+   * creates a connection and waits until the extension state has picked it up, and, unless told
+   * otherwise, until this node is connected to its broker
+   */
+  def createConnection(kind: String, settings: JsObject, waitConnected: Boolean = true): String = {
+    val id  = s"connection_${UUID.randomUUID()}"
+    val res = await(admin(connectionsPath).post(connectionJson(id, kind, settings)))
     if (res.status > 299) throw new RuntimeException(s"could not create the connection: ${res.status} ${res.body}")
     eventually(s"connection $id in the extension state")(extension.states.connection(id).isDefined)
+    if (waitConnected) eventually(s"connection $id connected", 60.seconds)(connectionState(id).contains(ConnectionState.Connected))
     id
   }
 
+  def updateConnection(id: String, kind: String, settings: JsObject): Unit = {
+    val res = await(admin(s"$connectionsPath/$id").put(connectionJson(id, kind, settings)))
+    if (res.status > 299) throw new RuntimeException(s"could not update the connection: ${res.status} ${res.body}")
+  }
+
   def deleteConnection(id: String): WSResponse = await(admin(s"$connectionsPath/$id").delete())
+
+  /** what the admin api says of the connections of this node */
+  def connectionStatus(id: String): WSResponse =
+    await(admin(s"/api/extensions/cloud-apim/event-brokers/connections/$id/_status").get())
+
+  def connectionStatuses(): WSResponse =
+    await(admin("/api/extensions/cloud-apim/event-brokers/connections/_status").get())
 
   def createRoute(plugins: Seq[NgPluginInstance]): NgRoute = {
     val id    = uniq("route")

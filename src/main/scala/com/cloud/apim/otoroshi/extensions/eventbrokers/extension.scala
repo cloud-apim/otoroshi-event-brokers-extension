@@ -2,6 +2,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import org.apache.pekko.stream.scaladsl.StreamConverters
 import org.apache.pekko.util.ByteString
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities._
 import otoroshi.env.Env
 import otoroshi.models._
@@ -10,6 +11,7 @@ import otoroshi.utils.cache.types.UnboundedTrieMap
 import otoroshi.utils.syntax.implicits._
 import org.apache.pekko.stream.Materializer
 import play.api.Logger
+import play.api.libs.json.{JsArray, JsObject, Json}
 import play.api.mvc.{RequestHeader, Results}
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -45,12 +47,44 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
 
   override def enabled: Boolean = env.isDev || configuration.getOptional[Boolean]("enabled").getOrElse(false)
 
+  /** the broker clients of this node */
+  lazy val connections: ConnectionManager =
+    new ConnectionManager(env, ConnectionManagerSettings.from(configuration), _.newClientInstance()(using env))
+
   override def start(): Unit = {
     logger.info("the 'Event Brokers Extension' is enabled !")
+    connections.start()
   }
 
   override def stop(): Unit = {
+    connections.stop()
   }
+
+  // what this node sees: every node has its own clients, and the admin api answers for the node
+  // serving it (the leader, in a cluster)
+  override def adminApiRoutes(): Seq[AdminExtensionAdminApiRoute] = Seq(
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/connections/_status",
+      false,
+      (_, _, _, _) => {
+        Results.Ok(Json.obj("node" -> nodeJson, "connections" -> JsArray(connections.statusesJson()))).vfuture
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/connections/:id/_status",
+      false,
+      (ctx, _, _, _) => {
+        ctx.named("id").flatMap(connections.statusJson) match {
+          case Some(status) => Results.Ok(status ++ Json.obj("node" -> nodeJson)).vfuture
+          case None         => Results.NotFound(Json.obj("error" -> "not_found", "error_description" -> "no such connection")).vfuture
+        }
+      }
+    )
+  )
+
+  private def nodeJson: JsObject = Json.obj("cluster_mode" -> env.clusterConfig.mode.name)
 
   override def frontendExtensions(): Seq[AdminExtensionFrontendExtension] = Seq(
     AdminExtensionFrontendExtension(
@@ -175,6 +209,7 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
       connections <- datastores.eventBrokerConnectionDatastore.findAllAndFillSecrets()
     } yield {
       states.updateConnections(connections)
+      this.connections.sync(connections)
       ()
     }
   }

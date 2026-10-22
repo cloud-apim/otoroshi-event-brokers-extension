@@ -33,6 +33,54 @@ Every plugin points to an **event broker connection**. Per-call options (`topic`
 `group_id`, `auto_offset_reset`, `take`, `drop`, `duration`, ...) are read from query parameters and
 headers prefixed with `x-ca-event-broker-opts-`.
 
+### Connections
+
+Every Otoroshi node keeps one client per connection, **connected in the background** as soon as the
+connection exists: no request ever waits for a broker to be reached.
+
+- A connection that cannot connect is **unavailable** and tries again, waiting twice as long each time
+  (1s up to 30s). Its routes answer `503` with a `Retry-After` at once.
+- A connected client is **checked** against its broker every 10s. A broker that stops answering makes
+  the connection unavailable until it answers again; after 3 failed checks in a row the client is
+  closed and built again.
+- **New settings** get a client of their own, which takes over once connected: the previous settings
+  serve the requests until then, and keep doing so if the new ones never connect (the status says
+  why). The streams still open on the previous client may go on for 30s before it is closed.
+- A deleted connection's client is closed the same way.
+
+The state of the connections of a node is in the backoffice list, and in the admin API:
+
+```bash
+curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/connections/_status -u admin-api-apikey-id:admin-api-apikey-secret
+curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/connections/<id>/_status -u ...
+```
+
+```json
+{
+  "id": "connection_...", "name": "orders", "kind": "kafka",
+  "state": "connected", "since": 1792663171364, "error": null, "failures": 0,
+  "last_check_at": 1792663181364, "next_attempt_at": null,
+  "pending": null
+}
+```
+
+`state` is `connecting`, `connected`, `unavailable` or `closed`. `pending` is the status of new settings
+that are not connected yet. In a cluster each node has its own clients: the admin API answers for the
+node serving it.
+
+### Analytics events and metrics
+
+| Event                                | `@type` / `alert`                                | Sent when                                   |
+|--------------------------------------|--------------------------------------------------|---------------------------------------------|
+| `EventBrokerConnectionEvent`         | `EventBrokerConnectionEvent`                     | a connection changes state on a node        |
+| `EventBrokerConnectionUnavailableAlert` | `AlertEvent` / `EventBrokerConnectionUnavailable` | a connection cannot connect, or loses its broker |
+
+Both carry the `connection` (`id`, `name`, `kind`), the `previous_state` and the `status` above. One alert
+per outage, not one per attempt.
+
+Metrics, when Otoroshi's metrics are enabled: `cloud-apim.event-brokers.connections.<state>` (how many
+connections of the node are in each state) and `cloud-apim.event-brokers.connections.transitions.<state>`.
+
 ## Requirements
 
 - Otoroshi **18.0.0** or later
@@ -55,6 +103,22 @@ The extension is enabled as soon as its jar is loaded. To turn it off:
 ```hocon
 otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.enabled = false
 # or CLOUD_APIM_EXTENSIONS_EVENT_BROKERS_ENABLED=false
+```
+
+The lifecycle of the connections can be tuned in the same block (defaults shown, each one also
+readable from an environment variable, see [`reference.conf`](src/main/resources/reference.conf)):
+
+```hocon
+otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.connections {
+  connect-timeout = 10s
+  retry.min-backoff = 1s
+  retry.max-backoff = 30s
+  healthcheck.interval = 10s
+  healthcheck.timeout = 5s
+  healthcheck.max-failures = 3
+  retire-grace-period = 30s
+  close-timeout = 10s
+}
 ```
 
 ## Getting started
@@ -84,7 +148,9 @@ otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.enab
 
 | Suites                                   | What they run against                                        | Needs   |
 |------------------------------------------|--------------------------------------------------------------|---------|
-| `EventWrapperSuite`, `PluginConfigSuite` | the code alone                                               | nothing |
+| `EventWrapperSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite` | the code alone                 | nothing |
+| `it.ConnectionManagerSuite`              | the connection lifecycle over fake brokers, on the env of an Otoroshi in the test jvm | nothing |
+| `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.MqttSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip

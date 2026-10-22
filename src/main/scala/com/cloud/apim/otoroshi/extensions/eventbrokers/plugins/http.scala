@@ -14,6 +14,7 @@ import play.api.libs.json._
 import play.api.mvc.Results
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Failure, Success, Try}
 
 class HttpEventsIngester extends NgBackendCall {
 
@@ -76,26 +77,24 @@ class HttpEventsIngester extends NgBackendCall {
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
-      case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
-      case Some(extension) => extension.states.connection(config.ref) match {
-        case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
-        case Some(connection) => {
-          if (ctx.request.hasBody) {
-            val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-            val client = connection.client()
-            val (inSource, responseContentType) = bodySource(ctx, opts)
-            val outSource = inSource.mapAsync(1) { chunk =>
-                client.publish(chunk, opts, "fooo").map {
-                  case Left(err) => Json.obj("error" -> "publish_error", "error_details" -> err)
-                  case Right(Some(details)) => Json.obj("published" -> true, "details" -> details)
-                  case Right(None) => Json.obj("published" -> true)
-                }
+      case None => Left(PluginUtils.extensionNotAvailable).vfuture
+      case Some(_) if !ctx.request.hasBody =>
+        Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.BadRequest(Json.obj("error" -> "bad_request", "error_description" -> "no body provided")))).vfuture
+      case Some(extension) => extension.connections.acquire(config.ref) match {
+        case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
+        case Right(lease) => {
+          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+          val client = lease.client
+          val (inSource, responseContentType) = bodySource(ctx, opts)
+          val outSource = inSource.mapAsync(1) { chunk =>
+              client.publish(chunk, opts, "fooo").map {
+                case Left(err) => Json.obj("error" -> "publish_error", "error_details" -> err)
+                case Right(Some(details)) => Json.obj("published" -> true, "details" -> details)
+                case Right(None) => Json.obj("published" -> true)
               }
-              .map(_.stringify.applyOn(str => s"$str\n").byteString)
-            Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(outSource).as(responseContentType)), None)).vfuture
-          } else {
-            Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.BadRequest(Json.obj("error" -> "bad_request", "error_description" -> "no body provided")))).vfuture
-          }
+            }
+            .map(_.stringify.applyOn(str => s"$str\n").byteString)
+          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(outSource)).as(responseContentType)), None)).vfuture
         }
       }
     }
@@ -128,15 +127,20 @@ class HttpEventsConsumer extends NgBackendCall {
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
-      case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available")))).vfuture
-      case Some(extension) => extension.states.connection(config.ref) match {
-        case None => Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "connection not found")))).vfuture
-        case Some(connection) => {
-          val client = connection.client()
+      case None => Left(PluginUtils.extensionNotAvailable).vfuture
+      case Some(extension) => extension.connections.acquire(config.ref) match {
+        case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
+        case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          val source = client.consume(opts).map(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
-          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(source).as("application/x-nd-event")), None)).vfuture
+          Try(lease.client.consume(opts)) match {
+            case Failure(e) =>
+              lease.release()
+              Left(PluginUtils.consumeError(e)).vfuture
+            case Success(events) =>
+              val source = events.map(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("application/x-nd-event")), None)).vfuture
+          }
         }
       }
     }

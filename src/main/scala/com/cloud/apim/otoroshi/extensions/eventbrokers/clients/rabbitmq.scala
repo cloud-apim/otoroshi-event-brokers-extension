@@ -10,9 +10,11 @@ import otoroshi.utils.syntax.implicits._
 import play.api.libs.json.{JsObject, JsValue}
 import reactor.core.publisher.Sinks
 
+import java.util.concurrent.atomic.AtomicReference
 import java.util.{Date, UUID}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 
 class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
 
@@ -25,14 +27,31 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBroke
   config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => factory.setPassword(v))
   // TODO: handle declarations
   // TODO: handle recovery
+  factory.setConnectionTimeout(10000)
   val servers = config.settings.select("servers").asOpt[Seq[String]].getOrElse(Seq.empty)
-  val connection = factory.newConnection(servers.map(s => Address.parseAddress(s)).toArray)
-  val channel = connection.createChannel()
 
-  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = {
-    channel.close()
-    connection.close()
-    ().vfuture
+  private val connectionRef = new AtomicReference[Option[Connection]](None)
+  private val channelRef    = new AtomicReference[Option[Channel]](None)
+
+  private def channel: Channel = channelRef.get().getOrElse(throw new IllegalStateException("the rabbitmq client is not started"))
+
+  override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    val connection = factory.newConnection(servers.map(s => Address.parseAddress(s)).toArray)
+    connectionRef.set(Some(connection))
+    channelRef.set(Some(connection.createChannel()))
+  }
+
+  // the connection recovers by itself after a network failure, the channel does not survive a
+  // protocol error (a publish to an exchange that does not exist closes it)
+  override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = {
+    if (!connectionRef.get().exists(_.isOpen)) Future.failed(new IllegalStateException("the rabbitmq connection is closed"))
+    else if (!channelRef.get().exists(_.isOpen)) Future.failed(new IllegalStateException("the rabbitmq channel is closed"))
+    else Future.unit
+  }
+
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    channelRef.getAndSet(None).foreach(c => Try(if (c.isOpen) c.close()))
+    connectionRef.getAndSet(None).foreach(c => Try(c.close(5000)))
   }
 
   def buildProps(wrapper: EventWrapper): AMQP.BasicProperties = {
