@@ -6,6 +6,28 @@ function input(type, label, props) {
   };
 }
 
+const connectionStatusColors = {
+  connected: 'bg-success',
+  connecting: 'bg-info',
+  unavailable: 'bg-danger',
+  closed: 'bg-secondary',
+};
+
+function connectionStatusBadge(status) {
+  if (!status || !status.state) {
+    return React.createElement('span', { className: 'badge bg-secondary' }, 'unknown');
+  }
+  const pending = status.pending ? ` (new settings: ${status.pending.state}${status.pending.error ? ' - ' + status.pending.error : ''})` : '';
+  return React.createElement(
+    'span',
+    {
+      className: `badge ${connectionStatusColors[status.state] || 'bg-secondary'}`,
+      title: (status.error || status.state) + pending,
+    },
+    status.pending ? `${status.state} *` : status.state
+  );
+}
+
 class EventBrokerConnectionsPage extends Component {
 
   formSchema = {
@@ -114,7 +136,31 @@ class EventBrokerConnectionsPage extends Component {
       content: (item) => item.name,
     },
     { title: 'Kind', filterId: 'kind', content: (item) => item.kind },
+    {
+      title: 'Status',
+      notFilterable: true,
+      notSortable: true,
+      content: (item) => connectionStatusBadge(item._status),
+    },
   ];
+
+  // as seen by the node serving the backoffice: every node has its own clients
+  fetchStatuses = () => {
+    return fetch('/bo/api/proxy/api/extensions/cloud-apim/event-brokers/connections/_status', {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+      .then((r) => (r.status === 200 ? r.json() : { connections: [] }))
+      .then((body) => _.keyBy(body.connections || [], 'id'))
+      .catch(() => ({}));
+  };
+
+  fetchItems = () => {
+    return Promise.all([this.client.findAll(), this.fetchStatuses()]).then(([items, statuses]) =>
+      (items || []).map((item) => ({ ...item, _status: statuses[item.id] }))
+    );
+  };
 
   formFlow = (state) => {
     if (!state.kind) {
@@ -266,10 +312,11 @@ class EventBrokerConnectionsPage extends Component {
         formFlow: this.formFlow,
         columns: this.columns,
         stayAfterSave: true,
-        fetchItems: (paginationState) => this.client.findAll(),
-        updateItem: this.client.update,
-        deleteItem: this.client.delete,
-        createItem: this.client.create,
+        fetchItems: (paginationState) => this.fetchItems(),
+        // the status is only shown, never saved
+        updateItem: (item) => this.client.update(_.omit(item, ['_status'])),
+        deleteItem: (item) => this.client.delete(_.omit(item, ['_status'])),
+        createItem: (item) => this.client.create(_.omit(item, ['_status'])),
         navigateTo: (item) => {
           window.location = `/bo/dashboard/extensions/cloud-apim/event-brokers/connections/edit/${item.id}`
         },

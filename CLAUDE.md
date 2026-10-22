@@ -33,10 +33,19 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **extension.scala** - `EventBrokersExtension` (`AdminExtension`): entity registration, state synced
   from the datastore in `syncStates`, backoffice assets (the UI page is inlined into `extension.js`)
 - **entities/connections.scala** - `EventBrokerConnection` (kind + free-form `settings` JSON), its admin
-  API resource, its datastore, and the cache of broker clients (one per connection, rebuilt when the
-  settings hash changes)
+  API resource and its datastore
+- **manager.scala** - `ConnectionManager`, owned by the extension and fed by `syncStates`: one
+  `ConnectionSlot` per connection, holding the `ConnectionHandle` serving requests and, while new
+  settings connect, the next one (make before break). A handle connects in the background with backoff,
+  healthchecks its client periodically (rebuilds it after too many failures), and once retired closes
+  its client when the `ClientLease`s handed out are released or after the grace period. Plugins only
+  ever `acquire` a lease (and release it, `lease.releasing(source)`); they never build a client
+- **events.scala** - `EventBrokerConnectionEvent` (each state change) and
+  `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **api.scala** - `EventWrapper`, the broker-neutral event (key, data, content types, headers, vendor
-  metadata) with its JSON / SSE / websocket serializations, and the `EventBrokerClient` trait
+  metadata) with its JSON / SSE / websocket serializations, and the `EventBrokerClient` trait. A client
+  must not touch the network in its constructor: `start` / `healthcheck` / `close` run on the
+  manager's blocking pool, bounded by timeouts
 - **clients/** - one `EventBrokerClient` per broker kind
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
   `IngesterConsumerWebsocket` (ws.scala); utils.scala holds the shared plugin config and the per-call
@@ -50,6 +59,9 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
 ## Testing
 
 - `src/test/scala/.../eventbrokers/*Suite.scala` - unit suites, no infrastructure.
+- `it/ConnectionManagerSuite` drives a `ConnectionManager` of its own over `FakeClient`s (no docker):
+  the place for lifecycle rules. `it/ConnectionsSuite` checks the same against a real Redis (paused
+  with `docker pause`, connections counted with `INFO clients`).
 - `src/test/scala/.../eventbrokers/it/` - integration suites. `Gateway` boots one real Otoroshi in the
   test jvm (in-memory storage, extension enabled) shared by every suite; `Brokers` starts one
   testcontainers container per broker, lazily, shared too. Each suite creates a connection and routes

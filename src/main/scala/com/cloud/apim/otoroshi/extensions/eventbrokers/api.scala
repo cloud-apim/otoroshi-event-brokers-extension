@@ -139,10 +139,27 @@ case class EventWrapper(
   )
 }
 
+/**
+ * A client of one broker, for one version of one connection. Its lifecycle belongs to the
+ * `ConnectionManager`: building it must not touch the network, `start` opens what it needs, and
+ * nothing is published or consumed before `start` has succeeded.
+ *
+ * `start`, `healthcheck` and `close` are called on a thread pool made for blocking calls, so they
+ * may block (the manager bounds them with timeouts).
+ */
 trait EventBrokerClient {
+  def config: EventBrokerConnection
+  def hash: String = config.hash
+
+  /** opens the connections to the broker, fails when it cannot be reached */
+  def start()(using env: Env, ec: ExecutionContext): Future[Unit]
+
+  /** a cheap round trip to the broker, fails when it cannot be reached */
+  def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit]
+
+  /** releases everything `start` opened. must not fail, and works whether `start` ran or not */
+  def close()(using env: Env, ec: ExecutionContext): Future[Unit]
+
   def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
   def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?]
-  def close()(using env: Env, ec: ExecutionContext): Future[Unit]
-  def hash: String = config.hash
-  def config: EventBrokerConnection
 }

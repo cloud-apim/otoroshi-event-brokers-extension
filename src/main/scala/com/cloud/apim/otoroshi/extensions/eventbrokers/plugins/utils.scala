@@ -1,8 +1,11 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, Unavailability}
 import org.apache.pekko.stream.scaladsl.Source
 import otoroshi.next.plugins.api.{NgPluginConfig, NgPluginHttpRequest}
+import otoroshi.next.proxy.NgProxyEngineError
 import play.api.libs.json.{Format, JsError, JsObject, JsResult, JsSuccess, JsValue, Json}
+import play.api.mvc.Results
 import otoroshi.utils.syntax.implicits._
 
 import scala.concurrent.duration.DurationInt
@@ -56,6 +59,31 @@ object EventBrokerPluginConfig {
 object PluginUtils {
 
   val prefix = "x-ca-event-broker-opts-"
+
+  def extensionNotAvailable: NgProxyEngineError = NgProxyEngineError.NgResultProxyEngineError(
+    Results.InternalServerError(Json.obj("error" -> "internal_server_error", "error_description" -> "extension not available"))
+  )
+
+  /** a route pointing to a connection that does not exist is misconfigured; one that is not connected (yet) is not */
+  def unavailable(reason: Unavailability): NgProxyEngineError = reason match {
+    case Unavailability.UnknownConnection(_) =>
+      NgProxyEngineError.NgResultProxyEngineError(
+        Results.InternalServerError(Json.obj("error" -> "connection_not_found", "error_description" -> reason.message))
+      )
+    case notConnected: Unavailability.NotConnected =>
+      NgProxyEngineError.NgResultProxyEngineError(
+        Results
+          .ServiceUnavailable(
+            Json.obj("error" -> "connection_unavailable", "error_description" -> reason.message, "state" -> notConnected.status.state.name)
+          )
+          .withHeaders("Retry-After" -> notConnected.retryAfter.toString)
+      )
+  }
+
+  /** the broker refused to open a stream (a consumer it does not allow, a queue that does not exist, ...) */
+  def consumeError(e: Throwable): NgProxyEngineError = NgProxyEngineError.NgResultProxyEngineError(
+    Results.BadGateway(Json.obj("error" -> "consume_error", "error_description" -> ConnectionManager.describe(e)))
+  )
 
   def buildOpts(req: NgPluginHttpRequest, localConfig: Map[String, String], includeQuery: Boolean, includeHeaders: Boolean): JsObject = {
     val query: Map[String, String] = if (!includeQuery) Map.empty else req.uri.query().toMap.collect {
