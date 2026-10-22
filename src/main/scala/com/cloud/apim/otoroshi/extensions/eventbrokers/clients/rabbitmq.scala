@@ -1,61 +1,121 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import org.apache.pekko.stream.scaladsl.Source
-import org.apache.pekko.util.ByteString
+import com.cloud.apim.otoroshi.extensions.eventbrokers.*
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, RabbitMQSettings}
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
-import com.rabbitmq.client._
+import com.rabbitmq.client.*
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.stream.Materializer
+import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
-import otoroshi.utils.syntax.implicits._
-import play.api.libs.json.{JsObject, JsValue}
-import reactor.core.publisher.Sinks
+import otoroshi.utils.syntax.implicits.*
+import play.api.libs.json.{JsObject, Json}
 
+import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.atomic.AtomicReference
 import java.util.{Date, UUID}
-import scala.concurrent.{ExecutionContext, Future}
-import scala.jdk.CollectionConverters._
+import scala.concurrent.duration.*
+import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
+import scala.util.control.NonFatal
 
-class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQSettings) extends EventBrokerClient {
+/**
+ * Publishing goes through one channel with publisher confirms: a publish is done once the broker has
+ * taken the message, and published `mandatory`, so a message no queue gets is reported instead of
+ * silently dropped. Every subscription gets a channel of its own, closed with it.
+ */
+class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQSettings) extends EventBrokerClient with BlockingIo {
 
-  val factory = new ConnectionFactory()
+  private val factory = new ConnectionFactory()
   factory.setVirtualHost(settings.virtualHost)
   factory.setTopologyRecoveryEnabled(false)
   factory.setAutomaticRecoveryEnabled(true)
   factory.setNetworkRecoveryInterval(1000)
   settings.username.foreach(v => factory.setUsername(v))
   settings.password.foreach(v => factory.setPassword(v))
-  // TODO: handle declarations
-  // TODO: handle recovery
   factory.setConnectionTimeout(10000)
-  private val servers = settings.addresses
+
+  private val publishIdHeader = "x-otoroshi-publish-id"
 
   private val connectionRef = new AtomicReference[Option[Connection]](None)
-  private val channelRef    = new AtomicReference[Option[Channel]](None)
+  private val publisherRef  = new AtomicReference[Option[Channel]](None)
 
-  private def channel: Channel = channelRef.get().getOrElse(throw new IllegalStateException("the rabbitmq client is not started"))
+  /** the publishes waiting for their confirm, by sequence number */
+  private val pending  = new ConcurrentSkipListMap[java.lang.Long, (String, Promise[Unit])]()
+  /** the publishes the broker returned: no queue got them */
+  private val returned = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = false, replay = false, keys = false, headers = true)
+
+  private def connection: Connection = connectionRef.get().getOrElse(throw new IllegalStateException("the rabbitmq client is not started"))
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    val connection = factory.newConnection(servers.map(s => Address.parseAddress(s)).toArray)
+    rememberIo(ec)
+    val connection = factory.newConnection(settings.addresses.map(s => Address.parseAddress(s)).toArray)
     connectionRef.set(Some(connection))
-    channelRef.set(Some(connection.createChannel()))
+    publisherRef.set(Some(newPublisher(connection)))
   }
 
-  // the connection recovers by itself after a network failure, the channel does not survive a
-  // protocol error (a publish to an exchange that does not exist closes it)
-  override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = {
+  // the connection recovers by itself after a network failure. the publishing channel does not survive
+  // a protocol error, but it is opened again on the next publish
+  override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] =
     if (!connectionRef.get().exists(_.isOpen)) Future.failed(new IllegalStateException("the rabbitmq connection is closed"))
-    else if (!channelRef.get().exists(_.isOpen)) Future.failed(new IllegalStateException("the rabbitmq channel is closed"))
     else Future.unit
-  }
 
   def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    channelRef.getAndSet(None).foreach(c => Try(if (c.isOpen) c.close()))
+    publisherRef.getAndSet(None).foreach(c => Try(if (c.isOpen) c.close()))
     connectionRef.getAndSet(None).foreach(c => Try(c.close(5000)))
+    failPending(new IllegalStateException("the rabbitmq client is closed"))
   }
 
-  def buildProps(wrapper: EventWrapper): AMQP.BasicProperties = {
-    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map("content-type" -> wrapper.dataContentType, "key-content-type" -> wrapper.keyContentType)).view.mapValues(_.asInstanceOf[AnyRef]).toMap.asJava
+  private def failPending(e: Throwable): Unit = {
+    pending.values().asScala.foreach(_._2.tryFailure(e))
+    pending.clear()
+  }
+
+  private def newPublisher(connection: Connection): Channel = {
+    val channel = connection.createChannel()
+    channel.confirmSelect()
+    channel.addReturnListener(new ReturnListener {
+      override def handleReturn(code: Int, text: String, exchange: String, routingKey: String, props: AMQP.BasicProperties, body: Array[Byte]): Unit =
+        Option(props.getHeaders).flatMap(h => Option(h.get(publishIdHeader))).foreach(id => returned.add(id.toString))
+    })
+    channel.addConfirmListener(new ConfirmListener {
+      // a return always comes before the confirm of the same message
+      override def handleAck(tag: Long, multiple: Boolean): Unit = confirm(tag, multiple, nacked = false)
+      override def handleNack(tag: Long, multiple: Boolean): Unit = confirm(tag, multiple, nacked = true)
+    })
+    channel.addShutdownListener(new ShutdownListener {
+      override def shutdownCompleted(cause: ShutdownSignalException): Unit = failPending(cause)
+    })
+    channel
+  }
+
+  private def confirm(tag: Long, multiple: Boolean, nacked: Boolean): Unit = {
+    val confirmed = if (multiple) pending.headMap(tag, true) else pending.subMap(tag, true, tag, true)
+    confirmed.values().asScala.foreach { (id, promise) =>
+      if (returned.remove(id)) promise.tryFailure(new IllegalArgumentException("no queue got the message: the queue, or the binding, does not exist"))
+      else if (nacked) promise.tryFailure(new IllegalStateException("the broker refused the message"))
+      else promise.trySuccess(())
+    }
+    confirmed.clear()
+  }
+
+  /** the publishing channel, opened again when a protocol error closed it */
+  private def publisher: Channel = synchronized {
+    publisherRef.get().filter(_.isOpen).getOrElse {
+      val channel = newPublisher(connection)
+      publisherRef.set(Some(channel))
+      channel
+    }
+  }
+
+  private def buildProps(wrapper: EventWrapper, publishId: String): AMQP.BasicProperties = {
+    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map(
+      "content-type"     -> wrapper.dataContentType,
+      "key-content-type" -> wrapper.keyContentType,
+      publishIdHeader    -> publishId
+    )).view.mapValues(_.asInstanceOf[AnyRef]).toMap.asJava
     new AMQP.BasicProperties.Builder()
       .headers(headers)
       .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(value) }
@@ -74,93 +134,139 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       .build()
   }
 
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    val queueName = event.vendorMetadata.get("queue")
-      .orElse(opts.select("queue").asOpt[String])
-      .orElse(settings.defaultQueue)
-      .getOrElse(throw new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue"))
-    val routingKey = event.vendorMetadata.get("routing_key")
-      .orElse(opts.select("routing_key").asOpt[String])
-    val props = buildProps(event)
-    if (env.isDev) {
-      channel.queueDeclare(queueName, false, false, false, null)
+  private def noQueue = new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue")
+
+  /** an exchange and its routing key, or a queue through the default exchange */
+  private def target(event: EventWrapper, opts: JsObject): (String, String) = {
+    val exchange   = event.vendorMetadata.get("exchange").orElse(opts.select("exchange").asOpt[String]).getOrElse("")
+    val routingKey = event.vendorMetadata.get("routing_key").orElse(opts.select("routing_key").asOpt[String])
+    if (exchange.isEmpty) {
+      val queue = event.vendorMetadata.get("queue").orElse(opts.select("queue").asOpt[String]).orElse(routingKey).orElse(settings.defaultQueue).getOrElse(throw noQueue)
+      ("", queue)
+    } else {
+      (exchange, routingKey.getOrElse(""))
     }
-    routingKey match {
-      case Some(routingKey) => channel.basicPublish(queueName, routingKey, props, event.data.toArray)
-      case None => channel.basicPublish("", queueName, props, event.data.toArray)
-    }
-    Right(None).vfuture
   }
 
-  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
-    val hotSource = Sinks.many().unicast().onBackpressureBuffer[EventWrapper]()
-    val hotFlux   = hotSource.asFlux()
-    val cb = new DeliverCallback() {
-      override def handle(consumerTag: String, message: Delivery): Unit = {
-        val data = ByteString(message.getBody)
-        val props = Option(message.getProperties)
-        val envelope = message.getEnvelope
-        val headers: Map[String, AnyRef] = props.map(_.getHeaders).map(_.asScala.toMap).getOrElse(Map.empty[String, AnyRef])
-        val contentType = headers.get("content-type").map(_.toString).orElse(props.map(_.getContentType)).filter(_ != null).getOrElse("binary")
-        hotSource.tryEmitNext(
-          EventWrapper(
-            key = props.flatMap(v => Option(v.getMessageId)).map(_.byteString),
-            data = data,
-            keyContentType = "text",
-            dataContentType = contentType,
-            headers = headers.collect {
-              case (key, value) if value != null => (key, value.toString)
-            },
-            vendorMetadata = Map.apply[String, String](
-                "provider" -> "rabbitmq",
-                "exchange" -> envelope.getExchange,
-                "routing_key" -> envelope.getRoutingKey,
-                "delivery_tag" -> envelope.getDeliveryTag.toString,
-              )
-              .applyOnWithOpt(props) { case (map, props) => if (props.getContentType != null) map ++ Map("content_type" -> props.getContentType) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getContentEncoding != null) map ++ Map("content_encoding" -> props.getContentEncoding) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getDeliveryMode != null) map ++ Map("delivery_mode" -> Option(props.getDeliveryMode).map(_.toString).getOrElse("")) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getPriority != null) map ++ Map("priority" -> Option(props.getPriority).map(_.toString).getOrElse("")) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getCorrelationId != null) map ++ Map("correlation_id" -> props.getCorrelationId) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getReplyTo != null) map ++ Map("reply_to" -> props.getReplyTo) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getExpiration != null) map ++ Map("expiration" -> props.getExpiration) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getMessageId != null) map ++ Map("message_id" -> props.getMessageId) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getTimestamp != null) map ++ Map("timestamp" -> Option(props.getTimestamp).map(_.toString).getOrElse("")) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getType != null) map ++ Map("type" -> props.getType) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getUserId != null) map ++ Map("UserId" -> props.getUserId) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getAppId != null) map ++ Map("app_id" -> props.getAppId) else map }
-              .applyOnWithOpt(props) { case (map, props) => if (props.getClusterId != null) map ++ Map("cluster_id" -> props.getClusterId) else map }
-          )
+  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
+    Future {
+      // one publisher channel: publishes are serialized on it, which keeps their order
+      synchronized {
+        events.map { event =>
+          try {
+            val (exchange, routingKey) = target(event, opts)
+            val publishId              = UUID.randomUUID().toString
+            val channel                = publisher
+            val promise                = Promise[Unit]()
+            pending.put(channel.getNextPublishSeqNo, (publishId, promise))
+            channel.basicPublish(exchange, routingKey, true, buildProps(event, publishId), event.data.toArray)
+            promise.future.map(_ => PublishResult.ok(Json.obj("exchange" -> exchange, "routing_key" -> routingKey)))
+          } catch {
+            case NonFatal(e) => Future.successful(PublishResult.failed(e))
+          }
+        }
+      }
+    }(using io).flatMap { results =>
+      Future.sequence(results.map { result =>
+        val timeout = org.apache.pekko.pattern.after(30.seconds, env.otoroshiScheduler)(
+          Future.successful(PublishResult(error = Some("the broker did not confirm the message within 30 seconds")))
         )
+        Future.firstCompletedOf(Seq(result.recover { case NonFatal(e) => PublishResult.failed(e) }, timeout))
+      })
+    }
+
+  private def toEvent(message: Delivery): EventWrapper = {
+    val props                        = Option(message.getProperties)
+    val envelope                     = message.getEnvelope
+    val headers: Map[String, AnyRef] = props.flatMap(p => Option(p.getHeaders)).map(_.asScala.toMap).getOrElse(Map.empty[String, AnyRef]) - publishIdHeader
+    val contentType                  = headers.get("content-type").map(_.toString).orElse(props.flatMap(p => Option(p.getContentType))).getOrElse("binary")
+    def opt(name: String, value: => Any): Option[(String, String)] = Option(value).map(v => (name, v.toString))
+    EventWrapper(
+      key = props.flatMap(p => Option(p.getMessageId)).map(_.byteString),
+      data = ByteString(message.getBody),
+      keyContentType = "text",
+      dataContentType = contentType,
+      headers = headers.collect { case (key, value) if value != null => (key, value.toString) },
+      vendorMetadata = Map(
+        "provider"     -> "rabbitmq",
+        "exchange"     -> envelope.getExchange,
+        "routing_key"  -> envelope.getRoutingKey,
+        "delivery_tag" -> envelope.getDeliveryTag.toString,
+        "redelivered"  -> envelope.isRedeliver.toString
+      ) ++ props.toSeq.flatMap { p =>
+        Seq(
+          opt("content_type", p.getContentType),
+          opt("content_encoding", p.getContentEncoding),
+          opt("delivery_mode", p.getDeliveryMode),
+          opt("priority", p.getPriority),
+          opt("correlation_id", p.getCorrelationId),
+          opt("reply_to", p.getReplyTo),
+          opt("expiration", p.getExpiration),
+          opt("message_id", p.getMessageId),
+          opt("timestamp", Option(p.getTimestamp).map(_.getTime).orNull),
+          opt("type", p.getType),
+          opt("user_id", p.getUserId),
+          opt("app_id", p.getAppId),
+          opt("cluster_id", p.getClusterId)
+        ).flatten
       }
-    }
-    val cancelCb = new CancelCallback() {
-      override def handle(consumerTag: String): Unit = {
-        hotSource.tryEmitComplete()
-      }
-    }
-    val shutdownCb = new ConsumerShutdownSignalCallback() {
-      override def handleShutdownSignal(consumerTag: String, sig: ShutdownSignalException): Unit = {
-        hotSource.tryEmitComplete()
-      }
-    }
-    // TODO: handle cancel, shutdown, end of stream, etc
-    val queueName = opts.select("queue").asOpt[String]
-      .orElse(settings.defaultQueue)
-      .getOrElse(throw new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue"))
-    val routingKey = opts.select("routing_key").asOpt[String]
-    if (env.isDev) {
-      channel.queueDeclare(queueName, false, false, false, null)
-    }
-    routingKey match {
-      case Some(routingKey) => {
-        val tmpQueue = channel.queueDeclare(s"tmp-consumption-queue-${UUID.randomUUID().toString}", false, true, true, null)
-        val tmpQueueName = tmpQueue.getQueue
-        channel.queueBind(tmpQueueName, queueName, routingKey)
-        channel.basicConsume(tmpQueueName, true, cb, cancelCb, shutdownCb)
-      }
-      case None => channel.basicConsume(queueName, true, cb, cancelCb, shutdownCb)
-    }
-    Source.fromPublisher(hotFlux)
+    )
   }
+
+  /**
+   * a queue: its consumers share its messages (that is what a queue is). an exchange and a routing
+   * key: a queue of its own, bound to them, gone with the subscription (every subscriber gets every
+   * message)
+   */
+  override def subscribe(spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] = Future {
+    val exchange   = spec.options.select("exchange").asOpt[String].filter(_.nonEmpty)
+    val routingKey = spec.options.select("routing_key").asOpt[String]
+    val prefetch   = spec.options.select("prefetch").asOpt[String].map(_.toInt).getOrElse(100)
+    val channel    = connection.createChannel()
+    try {
+      channel.basicQos(prefetch)
+      val queue = exchange match {
+        case Some(name) =>
+          val own = channel.queueDeclare(s"otoroshi-${UUID.randomUUID()}", false, true, true, null).getQueue
+          channel.queueBind(own, name, routingKey.getOrElse(""))
+          own
+        case None       =>
+          val name = spec.topics.headOption.orElse(settings.defaultQueue).getOrElse(throw noQueue)
+          // fails, and closes the channel, when there is no such queue
+          channel.queueDeclarePassive(name)
+          name
+      }
+      given Materializer = env.otoroshiMaterializer
+      // never more than `prefetch` unacked messages are delivered: the buffer does not overflow
+      val (deliveries, source) = Source.queue[Delivery](prefetch + 16).preMaterialize()
+      val tag                  = channel.basicConsume(
+        queue,
+        false,
+        new DeliverCallback { override def handle(tag: String, message: Delivery): Unit = { deliveries.offer(message); () } },
+        new CancelCallback { override def handle(tag: String): Unit = deliveries.complete() },
+        new ConsumerShutdownSignalCallback {
+          override def handleShutdownSignal(tag: String, sig: ShutdownSignalException): Unit =
+            if (sig.isInitiatedByApplication) deliveries.complete() else deliveries.fail(sig)
+        }
+      )
+      def ack(message: Delivery): Future[Unit] = Future(channel.basicAck(message.getEnvelope.getDeliveryTag, false))(using io)
+      val events               = spec.delivery match {
+        // acked as they are handed over: what the buffer holds is still the broker's
+        case DeliveryMode.AtMostOnce  => source.map { message => ack(message); ReceivedEvent.unacked(toEvent(message)) }
+        case DeliveryMode.AtLeastOnce => source.map(message => new ReceivedEvent(toEvent(message), () => ack(message)))
+      }
+      // closing the channel gives back what was not acked
+      Subscribed(events) { () =>
+        Future {
+          Try(channel.basicCancel(tag))
+          Try(if (channel.isOpen) channel.close())
+        }(using io)
+        ()
+      }
+    } catch {
+      case NonFatal(e) =>
+        Try(if (channel.isOpen) channel.close())
+        throw e
+    }
+  }(using io)
 }

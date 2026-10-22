@@ -42,10 +42,8 @@ class PulsarSuite extends BrokerSuite {
     assertEquals((res \ "published").asOpt[Boolean], Some(true), res.toString)
   }
 
-  // the consumer starts from the latest message: keep publishing until it is subscribed.
-  // the first message received kills the stream: its schema version is null (no schema on the
-  // topic) and goes straight into a ByteString
-  test("http consumer: what is published comes back, in order, with the pulsar metadata".fail) {
+  // the consumer starts from the latest message: keep publishing until it is subscribed
+  test("http consumer: what is published comes back, in order, with the pulsar metadata") {
     val topic    = uniq("http")
     val run      = uniq("run")
     val received = collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic)), take = 3, within = 60.seconds)
@@ -55,8 +53,7 @@ class PulsarSuite extends BrokerSuite {
     assert((events.head \ "vendor_metadata" \ "topic").as[String].endsWith(topic), events.head.toString)
   }
 
-  // same null schema version as above
-  test("sse consumer: one event per message".fail) {
+  test("sse consumer: one event per message") {
     val topic    = uniq("sse")
     val run      = uniq("run")
     val received = collect(Gateway.sse(sse, "/" + opts("topic" -> topic)), take = 3, within = 60.seconds)
@@ -64,8 +61,7 @@ class PulsarSuite extends BrokerSuite {
     assertConsecutive(numbers(await(received).map(e => Json.parse(e.data))), 3)
   }
 
-  // a new producer per publish, never closed
-  test("reuses its producer from one publish to the next".fail) {
+  test("reuses its producer from one publish to the next") {
     val topic = uniq("producers")
     val run   = uniq("run")
     (0 until 5).foreach(n => publish(topic, n, run))
@@ -73,17 +69,65 @@ class PulsarSuite extends BrokerSuite {
     assert(producers <= 1, s"$producers producers on the topic")
   }
 
-  // every consumer uses the same exclusive subscription, so a second one is refused
-  test("serves two consumers of the same topic at once".fail) {
+  test("serves two consumers of the same topic at once") {
     val topic  = uniq("concurrent")
     val path   = "/" + opts("topic" -> topic)
-    val first  = collect(Gateway.ndjson(consumer, path), take = 1, within = 15.seconds)
-    eventually("the first consumer on the subscription") {
-      (stats(topic) \ "subscriptions" \ "otoroshi" \ "consumers").as[JsArray].value.nonEmpty
+    val first  = collect(Gateway.ndjson(consumer, path), take = 1, within = 3.seconds)
+    eventually("the first consumer subscribed") {
+      (stats(topic) \ "subscriptions").as[JsObject].values.exists(s => (s \ "consumers").as[JsArray].value.nonEmpty)
     }
     val second = await(Gateway.request(consumer, path = path))
     second.discardEntityBytes()
     assertEquals(second.status.intValue(), 200)
     await(first)
+  }
+
+  def consumersOf(topic: String, subscription: String): Int =
+    (stats(topic) \ "subscriptions" \ subscription \ "consumers").asOpt[JsArray].map(_.value.size).getOrElse(0)
+
+  test("the subscribers of a group share the messages") {
+    val topic = uniq("shared")
+    val group = uniq("group")
+    val run   = uniq("run")
+    val path  = "/" + opts("topic" -> topic, "group" -> group)
+    val one   = collect(Gateway.ndjson(consumer, path), take = 6, within = 5.seconds)
+    val other = collect(Gateway.ndjson(consumer, path), take = 6, within = 5.seconds)
+    eventually("both subscribed")(consumersOf(topic, group) == 2)
+    (0 until 6).foreach(n => publish(topic, n, run))
+    val all   = numbers(await(one)) ++ numbers(await(other))
+    assertEquals(all.sorted, (0 until 6).toSeq)
+  }
+
+  test("a group keeps what is published while none of its subscribers is connected") {
+    val topic = uniq("durable")
+    val group = uniq("group")
+    val run   = uniq("run")
+    // the first subscriber creates the durable subscription of the group, and goes
+    await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "group" -> group)), take = 1, within = 2.seconds))
+    eventually("the first subscriber gone")(consumersOf(topic, group) == 0)
+    (0 until 2).foreach(n => publish(topic, n, run))
+    val received = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "group" -> group)), take = 2))
+    assertEquals(numbers(received), Seq(0, 1))
+  }
+
+  // `take` on the gateway's side: the events that went out are the ones acked
+  test("at least once in a group: what was not acked comes back to the next subscriber") {
+    val topic = uniq("redelivered")
+    val group = uniq("group")
+    val run   = uniq("run")
+    val path  = (take: Int) => "/" + opts("topic" -> topic, "group" -> group, "delivery" -> "at-least-once", "take" -> take)
+    val first = collect(Gateway.ndjson(consumer, path(1)), take = 1)
+    eventually("subscribed")(consumersOf(topic, group) == 1)
+    (0 until 3).foreach(n => publish(topic, n, run))
+    assertEquals(numbers(await(first)), Seq(0))
+    eventually("the first subscriber gone")(consumersOf(topic, group) == 0)
+    val rest  = await(collect(Gateway.ndjson(consumer, path(2)), take = 2))
+    assertEquals(numbers(rest).sorted, Seq(1, 2))
+  }
+
+  test("an offset is not a pulsar position: refused") {
+    val res = await(Gateway.request(consumer, path = "/" + opts("topic" -> uniq("offset"), "offset_from" -> 3)))
+    val body = await(res.entity.toStrict(10.seconds)).data.utf8String
+    assertEquals(res.status.intValue(), 400, body)
   }
 }

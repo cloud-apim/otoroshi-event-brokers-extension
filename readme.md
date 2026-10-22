@@ -29,9 +29,55 @@ events, or over a websocket. The brokers stay private, Otoroshi handles who may 
 | Cloud APIM - SSE events consumer            | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.SseEventConsumer`          | streams events as server-sent events                  |
 | Cloud APIM - Websocket Ingester/Consumer    | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.IngesterConsumerWebsocket` | publishes incoming frames, streams events back        |
 
-Every plugin points to an **event broker connection**. Per-call options (`topic`, `queue`, `channel`,
-`group_id`, `auto_offset_reset`, `take`, `drop`, `duration`, ...) are read from query parameters and
-headers prefixed with `x-ca-event-broker-opts-`.
+Every plugin points to an **event broker connection**. Per-call options are read from query parameters
+and headers prefixed with `x-ca-event-broker-opts-` (`?x-ca-event-broker-opts-topic=orders`).
+
+### Publishing
+
+The ingester publishes the body as one event, the `events` of a
+`application/vnd.cloud-apim-event-broker+json` body as a batch, or a chunked body line by line. It
+answers one JSON line per event, in order, once the broker has taken it or refused it:
+
+```json
+{"published": true, "details": {"topic": "orders", "partition": 0, "offset": 42}}
+{"published": false, "error": "publish_error", "error_description": "no queue got the message: ..."}
+```
+
+A broker refusing one event does not fail the others. Kafka and Pulsar give the position of the
+message, RabbitMQ waits for the broker's confirm and reports the messages no queue gets (instead of
+dropping them), Redis gives how many subscribers got the message.
+
+Publish options: `topic` (`queue`, `exchange` and `routing_key` for RabbitMQ, `channel` for Redis),
+`key` and `partition` for Kafka, `qos` and `retained` for MQTT.
+
+### Consuming
+
+The consumers subscribe once the call comes in, and answer an error before streaming anything when
+they cannot: `400` for what the call got wrong (no topic, an option the broker does not support), `502`
+for what the broker refused (a queue that does not exist), `503` while the connection is not connected.
+Everything the subscription holds on the broker (consumer, channel, subscription) is released when the
+client goes away.
+
+| Option | Means |
+|---|---|
+| `topic`, `topics`, `queue`, `channel` | what to read. The default of the connection without |
+| `group` (or `group_id`, `subscription`) | share the events with the other subscribers of the group, instead of getting them all |
+| `from` | `latest` (the default) or `earliest` |
+| `from_timestamp` | from that date (epoch millis) |
+| `offset_from` | from that offset (Kafka; `partition` for one partition, `offset_to` to stop) |
+| `delivery` | `at-most-once` (the default): acked as received. `at-least-once`: acked once handed over to the response, what a client did not get is delivered again |
+| `take`, `drop`, `duration` | how many events to stream, to skip, for how long (millis) |
+
+What each broker can do (anything else is refused with a `400`):
+
+|   | Kafka | RabbitMQ | Pulsar | Redis | MQTT |
+|---|---|---|---|---|---|
+| without a group | a consumer group of its own: every event | consumers of a queue share it; `exchange` + `routing_key`: a queue of its own, every message | a non durable subscription of its own: every message | every message | every message |
+| `group` | consumer group | no (a queue already is one) | durable subscription, shared (`subscription_type`: `exclusive`, `shared`, `failover`, `key_shared`) | no | no |
+| `at-least-once` | commits what was handed over | acks, the rest goes back to the queue | acks, the rest is delivered again | no | no |
+| `from` / replay | `earliest`, `from_timestamp`, `offset_from` | no | `earliest` (new group), `from_timestamp` | no | no |
+
+Other options: `prefetch` (RabbitMQ, 100), `qos` (MQTT), `client_id` and `group_instance_id` (Kafka).
 
 ### Connections
 
@@ -249,7 +295,7 @@ Every client gets its own id, the prefix and a random suffix: two nodes of a clu
 </details>
 
 A call that names no topic (queue, channel) uses the default one of its connection, and is refused with
-a `400` when there is none.
+a `400` when there is none (a publish gets a failed result for each event).
 
 ## Running the tests
 

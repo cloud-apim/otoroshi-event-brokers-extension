@@ -11,7 +11,6 @@ import play.api.libs.json._
 import play.api.mvc.Results
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
 
 class SseEventConsumer extends NgBackendCall {
 
@@ -45,13 +44,13 @@ class SseEventConsumer extends NgBackendCall {
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          Try(lease.client.consume(opts)) match {
-            case Failure(e) =>
+          PluginUtils.subscribe(lease.client, opts).map {
+            case Left(error) =>
               lease.release()
-              Left(PluginUtils.consumeError(e)).vfuture
-            case Success(events) =>
-              val source = events.map(w => w.sseSerialize(enriched)).withStreamOptions(opts)
-              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("text/event-stream")), None)).vfuture
+              Left(error)
+            case Right(events) =>
+              val source = PluginUtils.handOver(events)(w => w.sseSerialize(enriched)).withStreamOptions(opts)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("text/event-stream")), None))
           }
         }
       }

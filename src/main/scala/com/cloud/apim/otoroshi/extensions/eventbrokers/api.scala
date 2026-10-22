@@ -7,6 +7,7 @@ import otoroshi.env.Env
 import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 import otoroshi.utils.syntax.implicits._
 
+import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future}
 
 object EventWrapper {
@@ -160,6 +161,143 @@ trait EventBrokerClient {
   /** releases everything `start` opened. must not fail, and works whether `start` ran or not */
   def close()(using env: Env, ec: ExecutionContext): Future[Unit]
 
-  def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]]
-  def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?]
+  def capabilities: BrokerCapabilities
+
+  /**
+   * publishes the events, in order, and answers once the broker has taken them (or refused them):
+   * one result per event, in the same order. a broker refusing one event does not fail the others,
+   * only a broken client fails the future. `opts` are the options of the call (topic, key, ...); an
+   * event's own vendor metadata wins over them
+   */
+  def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]]
+
+  /**
+   * subscribes as `spec` says. the future fails when the subscription cannot be opened (no topic, a
+   * queue that does not exist, a consumer the broker refuses): IllegalArgumentException for what the
+   * call got wrong, anything else for what the broker said.
+   *
+   * the subscription lives as long as the source: once it completes, fails or is cancelled,
+   * everything it holds on the broker is released (consumer, channel, connection, subscription), and
+   * so it is if the source is never run (see `Subscribed`). with `AtLeastOnce`, each event must be
+   * acked once it has been handed over, and the unacked ones are delivered again to a later subscriber
+   */
+  def subscribe(spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]]
+}
+
+/** the sources holding broker resources */
+object Subscribed {
+
+  /**
+   * releases `release` once the source terminates, or after `timeout` if it is never run: the call
+   * that asked for it may be gone before its response streams anything
+   */
+  def apply[A, M](source: Source[A, M], timeout: FiniteDuration = 30.seconds)(release: () => Unit)(using env: Env): Source[A, M] = {
+    val released     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val materialized = new java.util.concurrent.atomic.AtomicBoolean(false)
+    def releaseOnce(): Unit = if (released.compareAndSet(false, true)) scala.util.Try(release())
+    val timer        = env.otoroshiScheduler.scheduleOnce(timeout)(if (!materialized.get()) releaseOnce())(using env.otoroshiExecutionContext)
+    source
+      .mapMaterializedValue { mat =>
+        materialized.set(true)
+        timer.cancel()
+        mat
+      }
+      .watchTermination() { (mat, done) =>
+        done.onComplete(_ => releaseOnce())(using ExecutionContext.parasitic)
+        mat
+      }
+  }
+}
+
+/**
+ * the io pool of the manager, kept by the client from its `start`: for the calls of the broker
+ * library that block (a send waiting for metadata, a publish waiting for room), which must never run
+ * on otoroshi's own threads
+ */
+trait BlockingIo {
+  @volatile private var ioEc: ExecutionContext = null
+  protected def rememberIo(ec: ExecutionContext): Unit = ioEc = ec
+  protected def io: ExecutionContext = Option(ioEc).getOrElse(throw new IllegalStateException("the client is not started"))
+}
+
+/** what a kind of broker can do, so that a subscription asking for something else is refused */
+final case class BrokerCapabilities(
+    /** at least once delivery: events are acked by the consumer and delivered again when they are not */
+    acks: Boolean,
+    /** subscribers sharing a group share the events instead of each getting all of them */
+    groups: Boolean,
+    /** a subscription can start before now: from the earliest event, an offset, a date */
+    replay: Boolean,
+    keys: Boolean,
+    headers: Boolean
+) {
+  def json: JsObject = Json.obj("acks" -> acks, "groups" -> groups, "replay" -> replay, "keys" -> keys, "headers" -> headers)
+
+  /** why the spec cannot be served, if it cannot */
+  def refuse(spec: SubscriptionSpec, kind: String): Option[String] = {
+    if (spec.delivery == DeliveryMode.AtLeastOnce && !acks) Some(s"$kind cannot acknowledge events: at-least-once delivery is not available")
+    else if (spec.group.isDefined && !groups) Some(s"$kind has no consumer groups")
+    else if (spec.from != StartFrom.Latest && !replay) Some(s"$kind only delivers what is published from now on")
+    else None
+  }
+}
+
+enum DeliveryMode(val name: String) {
+  /** acked as soon as received: an event lost on the way (a client going away) is not delivered again */
+  case AtMostOnce  extends DeliveryMode("at-most-once")
+  /** acked once handed over: an event not acked is delivered again, possibly twice */
+  case AtLeastOnce extends DeliveryMode("at-least-once")
+}
+
+object DeliveryMode {
+  def apply(value: String): Option[DeliveryMode] = values.find(_.name == value.trim.toLowerCase)
+}
+
+enum StartFrom {
+  /** what is published from now on */
+  case Latest
+  /** everything the broker still has */
+  case Earliest
+  /** what was published from that date on */
+  case Timestamp(epochMillis: Long)
+  /** from that offset, on every partition (or the one asked for) */
+  case Offset(offset: Long)
+}
+
+/** what to subscribe to. topics are topics, queues or channels, as the broker calls them */
+final case class SubscriptionSpec(
+    /** empty: the default one of the connection */
+    topics: Seq[String] = Seq.empty,
+    /** none: a subscription of its own, which gets every event (and is gone with the source) */
+    group: Option[String] = None,
+    from: StartFrom = StartFrom.Latest,
+    delivery: DeliveryMode = DeliveryMode.AtMostOnce,
+    /** what only some brokers understand (partition, routing key, qos, subscription type, ...) */
+    options: JsObject = Json.obj()
+)
+
+/** an event received from a broker, and how to acknowledge it */
+final class ReceivedEvent(val event: EventWrapper, onAck: () => Future[Unit]) {
+  private val acked = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** acknowledges the event to the broker. once: acking again does nothing */
+  def ack(): Future[Unit] = if (acked.compareAndSet(false, true)) onAck() else Future.unit
+}
+
+object ReceivedEvent {
+  /** for brokers with nothing to acknowledge */
+  def unacked(event: EventWrapper): ReceivedEvent = new ReceivedEvent(event, () => Future.unit)
+}
+
+final case class PublishResult(error: Option[String] = None, details: Option[JsValue] = None) {
+  def published: Boolean = error.isEmpty
+  def json: JsObject =
+    if (published) Json.obj("published" -> true) ++ details.map(d => Json.obj("details" -> d)).getOrElse(Json.obj())
+    else Json.obj("published" -> false, "error" -> "publish_error", "error_description" -> error)
+}
+
+object PublishResult {
+  def ok(details: JsValue): PublishResult = PublishResult(details = Some(details))
+  val done: PublishResult                = PublishResult()
+  def failed(e: Throwable): PublishResult = PublishResult(error = Some(ConnectionManager.describe(e)))
 }

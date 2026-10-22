@@ -14,7 +14,6 @@ import play.api.libs.json._
 import play.api.mvc.Results
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
 
 class HttpEventsIngester extends NgBackendCall {
 
@@ -84,16 +83,10 @@ class HttpEventsIngester extends NgBackendCall {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-          val client = lease.client
           val (inSource, responseContentType) = bodySource(ctx, opts)
-          val outSource = inSource.mapAsync(1) { chunk =>
-              client.publish(chunk, opts, "fooo").map {
-                case Left(err) => Json.obj("error" -> "publish_error", "error_details" -> err)
-                case Right(Some(details)) => Json.obj("published" -> true, "details" -> details)
-                case Right(None) => Json.obj("published" -> true)
-              }
-            }
-            .map(_.stringify.applyOn(str => s"$str\n").byteString)
+          val outSource = PluginUtils
+            .publishAll(lease.client, inSource, opts)
+            .map(result => s"${result.json.stringify}\n".byteString)
           Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(outSource)).as(responseContentType)), None)).vfuture
         }
       }
@@ -133,13 +126,13 @@ class HttpEventsConsumer extends NgBackendCall {
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
           val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          Try(lease.client.consume(opts)) match {
-            case Failure(e) =>
+          PluginUtils.subscribe(lease.client, opts).map {
+            case Left(error) =>
               lease.release()
-              Left(PluginUtils.consumeError(e)).vfuture
-            case Success(events) =>
-              val source = events.map(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
-              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("application/x-nd-event")), None)).vfuture
+              Left(error)
+            case Right(events) =>
+              val source = PluginUtils.handOver(events)(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("application/x-nd-event")), None))
           }
         }
       }

@@ -1,47 +1,54 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, KafkaSettings}
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.*
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, DescribeClusterOptions}
-import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, RecordMetadata}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
+import org.apache.kafka.clients.producer.{Callback, Producer, ProducerConfig, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.header.{Header, Headers}
 import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
+import org.apache.kafka.common.header.{Header, Headers}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import org.apache.pekko.kafka.scaladsl.Consumer
-import org.apache.pekko.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
-import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.kafka.ConsumerMessage.CommittableOffset
+import org.apache.pekko.kafka.scaladsl.{Committer, Consumer}
+import org.apache.pekko.kafka.{CommitterSettings, ConsumerSettings, ProducerSettings, Subscriptions}
+import org.apache.pekko.stream.scaladsl.{Keep, Source}
+import org.apache.pekko.stream.{Materializer, QueueOfferResult}
 import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
 import otoroshi.events.KafkaSettings.kafkaSettings
-import otoroshi.utils.syntax.implicits._
-import play.api.libs.json.{JsObject, JsValue, Json}
+import otoroshi.utils.syntax.implicits.*
+import play.api.libs.json.{JsObject, Json}
 
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.jdk.CollectionConverters.*
+import scala.jdk.FutureConverters.*
 import scala.util.Try
 import scala.util.control.NonFatal
 
-class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettings, env: Env) extends EventBrokerClient {
+class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettings, env: Env) extends EventBrokerClient with BlockingIo {
 
-  // TODO: handle post of Json bodies with kafka vnd format, so we could extract keys
   private val kconfig = settings.kafkaConfig
-
-  // lazy val logger = play.api.Logger("KafkaBrokerClient")
 
   // kafkaSettings may block (it waits for the certificates with mtls): only computed in start
   private lazy val properties: Map[String, String] = kafkaSettings(env, kconfig)
 
   private lazy val producerSettings = ProducerSettings
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
+    // send blocks while it looks the topic up: not for a minute, and never on otoroshi's threads
+    .withProperty(ProducerConfig.MAX_BLOCK_MS_CONFIG, "10000")
     .withProperties(properties)
     .withBootstrapServers(kconfig.servers.mkString(","))
 
   private lazy val consumerSettings = ConsumerSettings
     .create(env.analyticsActorSystem, new ByteArrayDeserializer(), new ByteArrayDeserializer())
+    // once the source stops, the consumer stays up this long for the last commits to go through. it
+    // keeps its partitions meanwhile: the default 30 seconds would hold the next subscriber of the group
+    .withStopTimeout(2.seconds)
     .withProperties(properties)
     .withBootstrapServers(kconfig.servers.mkString(","))
 
@@ -51,7 +58,12 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
   private def producer: Producer[Array[Byte], Array[Byte]] =
     producerRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
 
+  private def admin: Admin = adminRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
+
+  override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = true, replay = true, keys = true, headers = true)
+
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
+    rememberIo(ec)
     val adminProperties = new java.util.Properties()
     properties.foreach((k, v) => adminProperties.put(k, v))
     adminProperties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kconfig.servers.mkString(","))
@@ -62,64 +74,11 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
   // the producer connects lazily and silently retries forever: asking the cluster who it is tells
   // whether the brokers can actually be reached
   override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    adminRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
+    admin
       .describeCluster(new DescribeClusterOptions().timeoutMs(10000))
       .clusterId()
       .get(10, TimeUnit.SECONDS)
     ()
-  }
-
-  private def buildHeaders(wrapper: EventWrapper): Headers = {
-    val headers = wrapper.headers ++ Map(
-      "content-type" -> wrapper.dataContentType,
-      "key-content-type" -> wrapper.keyContentType,
-      "timestamp" -> System.currentTimeMillis().toString
-    )
-    val hds: Array[Header] = headers.map {
-      case (key, value) => new RecordHeader(key, value.byteString.toArray)
-    }.toArray
-    new RecordHeaders(hds)
-  }
-
-  def ppublish(event: EventWrapper, opts: JsObject)(using ec: ExecutionContext): Future[JsValue] = {
-    val promise = Promise[RecordMetadata]()
-    val topic = event.vendorMetadata.get("topic")
-      .orElse(opts.select("topic").asOpt[String])
-      .orElse(settings.defaultTopic)
-      .getOrElse(throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic"))
-    val key = event.key
-      .orElse(event.vendorMetadata.get("key").map(_.byteString))
-      .orElse(opts.select("key").asOpt[String].map(_.byteString))
-    val partition = event.vendorMetadata.get("partition")
-      .orElse(opts.select("partition").asOpt[String])
-      .map(_.toInt)
-    val timestamp = event.vendorMetadata.get("timestamp")
-      .orElse(opts.select("timestamp").asOpt[String])
-      .map(_.toLong)
-    try {
-      val pr = new ProducerRecord[Array[Byte], Array[Byte]](
-        topic,
-        if (partition.isEmpty) null else partition.get,
-        if (timestamp.isEmpty) null else timestamp.get,
-        if (key.isEmpty) null else key.get.toArray,
-        event.data.toArray,
-        buildHeaders(event)
-      )
-      producer.send(pr, callback(promise))
-    } catch {
-      case NonFatal(e) =>
-        promise.failure(e)
-    }
-    promise.future.map { rm =>
-      Json.obj(
-        "topic" -> rm.topic(),
-        "offset" -> rm.offset(),
-        "partition" -> rm.partition(),
-        "timestamp" -> rm.timestamp(),
-        "serialized_key_size" -> rm.serializedKeySize(),
-        "serialized_value_size" -> rm.serializedValueSize(),
-      )
-    }
   }
 
   def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
@@ -127,90 +86,161 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
     adminRef.getAndSet(None).foreach(a => Try(a.close(java.time.Duration.ofSeconds(5))))
   }
 
-  private def callback(promise: Promise[RecordMetadata]) =
-    new Callback {
-      override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit =
-        if (exception != null) {
-          promise.failure(exception)
-        } else {
-          promise.success(metadata)
-        }
+  private def noTopic = new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic")
 
+  private def buildHeaders(wrapper: EventWrapper): Headers = {
+    val headers = wrapper.headers ++ Map(
+      "content-type"     -> wrapper.dataContentType,
+      "key-content-type" -> wrapper.keyContentType,
+      "timestamp"        -> System.currentTimeMillis().toString
+    )
+    val hds: Array[Header] = headers.map { case (key, value) =>
+      new RecordHeader(key, value.byteString.toArray)
+    }.toArray
+    new RecordHeaders(hds)
+  }
+
+  private def send(event: EventWrapper, opts: JsObject): Future[RecordMetadata] = {
+    val promise = Promise[RecordMetadata]()
+    try {
+      val topic     = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).orElse(settings.defaultTopic).getOrElse(throw noTopic)
+      val key       = event.key.orElse(event.vendorMetadata.get("key").map(_.byteString)).orElse(opts.select("key").asOpt[String].map(_.byteString))
+      val partition = event.vendorMetadata.get("partition").orElse(opts.select("partition").asOpt[String]).map(_.toInt)
+      val timestamp = event.vendorMetadata.get("timestamp").orElse(opts.select("timestamp").asOpt[String]).map(_.toLong)
+      val record    = new ProducerRecord[Array[Byte], Array[Byte]](
+        topic,
+        partition.map(Integer.valueOf).orNull,
+        timestamp.map(java.lang.Long.valueOf).orNull,
+        key.map(_.toArray).orNull,
+        event.data.toArray,
+        buildHeaders(event)
+      )
+      producer.send(
+        record,
+        new Callback {
+          override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit =
+            if (exception != null) promise.tryFailure(exception) else promise.trySuccess(metadata)
+        }
+      )
+    } catch {
+      case NonFatal(e) => promise.tryFailure(e)
+    }
+    promise.future
+  }
+
+  // send is called in order on one thread: the records keep their order in each partition
+  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
+    Future(events.map(event => send(event, opts)))(using io).flatMap { sent =>
+      Future.sequence(sent.map { result =>
+        result
+          .map { rm =>
+            PublishResult.ok(
+              Json.obj(
+                "topic"                 -> rm.topic(),
+                "offset"                -> rm.offset(),
+                "partition"             -> rm.partition(),
+                "timestamp"             -> rm.timestamp(),
+                "serialized_key_size"   -> rm.serializedKeySize(),
+                "serialized_value_size" -> rm.serializedValueSize()
+              )
+            )
+          }
+          .recover { case NonFatal(e) => PublishResult.failed(e) }
+      })
     }
 
-  override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    ppublish(event, opts).map { res =>
-      Right(Some(res))
+  private def toEvent(rec: ConsumerRecord[Array[Byte], Array[Byte]]): EventWrapper = {
+    val contentType = rec.headers().headers("content-type").asScala.headOption.map(v => ByteString(v.value()).utf8String).getOrElse("binary")
+    EventWrapper(
+      key = Option(rec.key()).map(v => ByteString(v)),
+      data = Option(rec.value()).map(v => ByteString(v)).getOrElse(ByteString.empty),
+      keyContentType = "binary",
+      dataContentType = contentType,
+      headers = rec.headers().asScala.toSeq.map(header => (header.key(), ByteString(header.value()).utf8String)).toMap,
+      vendorMetadata = Map(
+        "provider"              -> "kafka",
+        "topic"                 -> rec.topic(),
+        "offset"                -> rec.offset().toString,
+        "partition"             -> rec.partition().toString,
+        "timestamp"             -> rec.timestamp().toString,
+        "timestamp_type"        -> rec.timestampType().name,
+        "serialized_key_size"   -> rec.serializedKeySize().toString,
+        "serialized_value_size" -> rec.serializedValueSize().toString
+      )
+    )
+  }
+
+  /** what to read: whole topics through the group, or explicit partitions from a position */
+  private def subscription(topics: Seq[String], spec: SubscriptionSpec)(using ec: ExecutionContext): Future[org.apache.pekko.kafka.Subscription] = {
+    val partition = spec.options.select("partition").asOpt[String].map(_.toInt)
+    if (spec.from == StartFrom.Latest || spec.from == StartFrom.Earliest) {
+      partition match {
+        case None    => Future.successful(Subscriptions.topics(topics.toSet))
+        case Some(p) => Future.successful(Subscriptions.assignment(topics.map(t => new TopicPartition(t, p)).toSet))
+      }
+    } else {
+      admin.describeTopics(topics.asJava).allTopicNames().toCompletionStage.asScala.map { descriptions =>
+        val partitions = descriptions.asScala.toSeq
+          .flatMap { (topic, description) =>
+            description.partitions().asScala.map(p => new TopicPartition(topic, p.partition()))
+          }
+          .filter(tp => partition.forall(_ == tp.partition()))
+        spec.from match {
+          case StartFrom.Offset(offset)  => Subscriptions.assignmentWithOffset(partitions.map(tp => (tp, offset)).toMap)
+          case StartFrom.Timestamp(time) => Subscriptions.assignmentOffsetsForTimes(partitions.map(tp => (tp, time)).toMap)
+          case _                         => Subscriptions.assignment(partitions.toSet)
+        }
+      }
     }
   }
 
   // https://pekko.apache.org/docs/pekko-connectors-kafka/current/consumer.html
-  override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
+  override def subscribe(spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] = {
+    val topics   = (if (spec.topics.isEmpty) settings.defaultTopic.toSeq else spec.topics).flatMap(_.split(",").map(_.trim)).filter(_.nonEmpty)
+    if (topics.isEmpty) Future.failed(noTopic) else subscribeTo(topics, spec)
+  }
 
-    import scala.jdk.CollectionConverters._
-
-    val topics = (opts.select("topics").asOpt[String].toSeq ++ opts.select("topic").asOpt[String].orElse(settings.defaultTopic).toSeq)
-      .flatMap(_.split(",").map(_.trim))
-      .filter(_.nonEmpty)
-    if (topics.isEmpty) throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic")
-    val offsetFromOpt = opts.select("offset_from").asOpt[String].map(_.toLong)
-    val offsetToOpt = opts.select("offset_to").asOpt[String].map(_.toLong)
-    val groupIdOpt = opts.select("group_id").asOpt[String].getOrElse(UUID.randomUUID().toString).some
-    val partitionOpt = opts.select("partition").asOpt[String].map(_.toInt)
-    val clientIdOpt = opts.select("client_id").asOpt[String]
-    val groupInstanceIdOpt = opts.select("group_instance_id").asOpt[String]
-    val autoOffsetResetOpt = opts.select("auto_offset_reset").asOpt[String] // earliest, latest, none
-
-    val localSettings = consumerSettings
-      .applyOnWithOpt(groupIdOpt)((s, groupId) => s.withGroupId(groupId))
-      .applyOnWithOpt(clientIdOpt)((s, clientId) => s.withClientId(clientId))
-      .applyOnWithOpt(groupInstanceIdOpt)((s, groupInstanceId) => s.withGroupInstanceId(groupInstanceId))
-      .applyOnWithOpt(autoOffsetResetOpt)((s, autoOffsetReset) => s.withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset))
-      .applyOnIf(groupIdOpt.isEmpty)(_.withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true"))
-      // TODO: delivery
-
-    val consumerRaw = offsetFromOpt match {
-      case None => Consumer.plainPartitionedSource(localSettings, Subscriptions.topics(topics.toSet.asJava))
-      case Some(offset) => Consumer.plainPartitionedManualOffsetSource(localSettings, Subscriptions.topics(topics.toSet.asJava),
-        getOffsetsOnAssign = partitions => {
-          val map: Map[TopicPartition, Long] = partitionOpt match {
-            case None => partitions.map(p => (p, offset)).toMap
-            case Some(part) => partitions
-              .filter(p => topics.contains(p.topic()))
-              .map(p => (new TopicPartition(p.topic(), part), offset))
-              .toMap
-          }
-          map.vfuture
-        },
-        onRevoke = _ => ()
-      )
+  // the consumer itself is only created once the source runs, and stopped with it
+  private def subscribeTo(topics: Seq[String], spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] = subscription(topics, spec).map { sub =>
+    val offsetTo = spec.options.select("offset_to").asOpt[String].map(_.toLong)
+    // without a group, a group of its own: the subscriber gets every event, and nothing it commits matters
+    val groupId  = spec.group.getOrElse(s"otoroshi-${UUID.randomUUID()}")
+    val local    = consumerSettings
+      .withGroupId(groupId)
+      .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, if (spec.from == StartFrom.Earliest) "earliest" else "latest")
+      // at most once in a group: committed as read. otherwise only what is acked is committed
+      .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, (spec.group.isDefined && spec.delivery == DeliveryMode.AtMostOnce).toString)
+      .applyOnWithOpt(spec.options.select("client_id").asOpt[String])((s, id) => s.withClientId(id))
+      .applyOnWithOpt(spec.options.select("group_instance_id").asOpt[String])((s, id) => s.withGroupInstanceId(id))
+    val events: Source[ReceivedEvent, ?] = spec.delivery match {
+      case DeliveryMode.AtMostOnce  =>
+        Consumer.plainSource(local, sub).map(rec => ReceivedEvent.unacked(toEvent(rec)))
+      case DeliveryMode.AtLeastOnce =>
+        given Materializer = env.otoroshiMaterializer
+        // the acks go through a committer, in batches; once the subscription ends, what is left is committed
+        val (acks, _) = Source
+          .queue[CommittableOffset](10000)
+          .toMat(Committer.sink(CommitterSettings(env.analyticsActorSystem).withMaxBatch(100).withMaxInterval(1.second)))(Keep.both)
+          .run()
+        // the consumer stays up a while after the source stops (stop-timeout) to let these commits through
+        Subscribed(
+          Consumer
+            .committableSource(local, sub)
+            .map { message =>
+              new ReceivedEvent(
+                toEvent(message.record),
+                () =>
+                  acks.offer(message.committableOffset) match {
+                    case QueueOfferResult.Enqueued => Future.unit
+                    case other                     => Future.failed(new IllegalStateException(s"could not ack kafka offset ${message.record.offset()}: $other"))
+                  }
+              )
+            }
+        )(() => acks.complete())
     }
-    val consumer = consumerRaw
-      .filter((topicPartition, _) => partitionOpt.forall(_ == topicPartition.partition()))
-      .flatMapConcat(_._2)
-    consumer
-      .takeWhile(rec => offsetToOpt.forall(rec.offset() <= _), false)
-      .map { rec =>
-        val contentType = rec.headers().headers("content-type").asScala.headOption.map(v => ByteString(v.value()).utf8String).getOrElse("binary")
-        EventWrapper(
-          key = Option(rec.key()).map(v => ByteString(v)),
-          data = ByteString(rec.value()),
-          keyContentType = "binary",
-          dataContentType = contentType,
-          headers = rec.headers().asScala.toSeq.map { header =>
-            (header.key(), ByteString(header.value()).utf8String)
-          }.toMap,
-          vendorMetadata = Map(
-            "provider" -> "kafka",
-            "topic" -> rec.topic(),
-            "offset" -> rec.offset().toString,
-            "partition" -> rec.partition().toString,
-            "timestamp" -> rec.timestamp().toString,
-            "timestamp_type" -> rec.timestampType().name,
-            "serialized_key_size" -> rec.serializedKeySize().toString,
-            "serialized_value_size" -> rec.serializedValueSize().toString,
-          )
-        )
-      }
+    offsetTo match {
+      case None     => events
+      case Some(to) => events.takeWhile(_.event.vendorMetadata.get("offset").exists(_.toLong <= to), false)
+    }
   }
 }
