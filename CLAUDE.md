@@ -50,8 +50,13 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   ever `acquire` a lease (and release it, `lease.releasing(source)`); they never build a client
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and
   `EventBrokerConnectionUnavailableAlert` (one per outage)
-- **api.scala** - `EventWrapper`, the broker-neutral event (key, data, content types, headers, vendor
-  metadata) with its JSON / SSE / websocket serializations, and the `EventBrokerClient` contract:
+- **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy
+  format) and `CloudEventBindings`: how an event becomes a `BrokerMessage` on each kind (binary mode
+  with `ce_` headers on kafka and pulsar, `cloudEvents:` application properties on rabbitmq, structured
+  payload on redis and mqtt) and back, a message without cloudevents attributes being synthesized
+  (position as id, `/<kind>/<topic>` as source), broker metadata added as `<kind><name>` extensions
+- **api.scala** - `BrokerMessage`, a message as a broker carries it (key, data, headers, metadata:
+  routing hints going out, what the broker says coming in), and the `EventBrokerClient` contract:
   - a client must not touch the network in its constructor: `start` / `healthcheck` / `close` run on
     the manager's io pool, bounded by timeouts. `BlockingIo` keeps that pool for the library calls that
     block (Kafka `send`, RabbitMQ publishes, Paho)
@@ -66,7 +71,9 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
     broker cannot serve. Keep them and the readme's table in sync
 - **clients/** - one `EventBrokerClient` per broker kind
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
-  `IngesterConsumerWebsocket` (ws.scala); utils.scala holds the shared plugin config, the per-call
+  `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
+  them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka positions
+  for `Last-Event-ID` resume); utils.scala holds the shared plugin config, the per-call
   options read from `x-ca-event-broker-opts-*` query params and headers, `subscriptionSpec` (options
   to `SubscriptionSpec`), `subscribe`, `handOver` and `publishAll` (batches of 100 / 10 ms)
 - **src/main/resources/cloudapim/extensions/event-brokers/** - backoffice page (plain JS, no build) and icon

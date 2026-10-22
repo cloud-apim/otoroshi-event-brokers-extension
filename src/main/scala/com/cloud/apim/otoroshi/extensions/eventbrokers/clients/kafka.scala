@@ -9,6 +9,7 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
 import org.apache.kafka.common.header.{Header, Headers}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
+import org.apache.pekko.kafka.ConsumerMessage
 import org.apache.pekko.kafka.ConsumerMessage.CommittableOffset
 import org.apache.pekko.kafka.scaladsl.{Committer, Consumer}
 import org.apache.pekko.kafka.{CommitterSettings, ConsumerSettings, ProducerSettings, Subscriptions}
@@ -88,25 +89,16 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
 
   private def noTopic = new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic")
 
-  private def buildHeaders(wrapper: EventWrapper): Headers = {
-    val headers = wrapper.headers ++ Map(
-      "content-type"     -> wrapper.dataContentType,
-      "key-content-type" -> wrapper.keyContentType,
-      "timestamp"        -> System.currentTimeMillis().toString
-    )
-    val hds: Array[Header] = headers.map { case (key, value) =>
-      new RecordHeader(key, value.byteString.toArray)
-    }.toArray
-    new RecordHeaders(hds)
-  }
+  private def buildHeaders(message: BrokerMessage): Headers =
+    new RecordHeaders(message.headers.map((key, value) => new RecordHeader(key, value.byteString.toArray): Header).toArray)
 
-  private def send(event: EventWrapper, opts: JsObject): Future[RecordMetadata] = {
+  private def send(event: BrokerMessage, opts: JsObject): Future[RecordMetadata] = {
     val promise = Promise[RecordMetadata]()
     try {
-      val topic     = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).orElse(settings.defaultTopic).getOrElse(throw noTopic)
-      val key       = event.key.orElse(event.vendorMetadata.get("key").map(_.byteString)).orElse(opts.select("key").asOpt[String].map(_.byteString))
-      val partition = event.vendorMetadata.get("partition").orElse(opts.select("partition").asOpt[String]).map(_.toInt)
-      val timestamp = event.vendorMetadata.get("timestamp").orElse(opts.select("timestamp").asOpt[String]).map(_.toLong)
+      val topic     = event.metadata.get("topic").orElse(opts.select("topic").asOpt[String]).orElse(settings.defaultTopic).getOrElse(throw noTopic)
+      val key       = event.key.orElse(event.metadata.get("key").map(_.byteString)).orElse(opts.select("key").asOpt[String].map(_.byteString))
+      val partition = event.metadata.get("partition").orElse(opts.select("partition").asOpt[String]).map(_.toInt)
+      val timestamp = event.metadata.get("timestamp").orElse(opts.select("timestamp").asOpt[String]).map(_.toLong)
       val record    = new ProducerRecord[Array[Byte], Array[Byte]](
         topic,
         partition.map(Integer.valueOf).orNull,
@@ -129,7 +121,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
   }
 
   // send is called in order on one thread: the records keep their order in each partition
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
     Future(events.map(event => send(event, opts)))(using io).flatMap { sent =>
       Future.sequence(sent.map { result =>
         result
@@ -149,15 +141,12 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
       })
     }
 
-  private def toEvent(rec: ConsumerRecord[Array[Byte], Array[Byte]]): EventWrapper = {
-    val contentType = rec.headers().headers("content-type").asScala.headOption.map(v => ByteString(v.value()).utf8String).getOrElse("binary")
-    EventWrapper(
+  private def toEvent(rec: ConsumerRecord[Array[Byte], Array[Byte]]): BrokerMessage =
+    BrokerMessage(
       key = Option(rec.key()).map(v => ByteString(v)),
       data = Option(rec.value()).map(v => ByteString(v)).getOrElse(ByteString.empty),
-      keyContentType = "binary",
-      dataContentType = contentType,
-      headers = rec.headers().asScala.toSeq.map(header => (header.key(), ByteString(header.value()).utf8String)).toMap,
-      vendorMetadata = Map(
+      headers = rec.headers().asScala.toSeq.map(header => (header.key(), Option(header.value()).map(v => ByteString(v).utf8String).getOrElse(""))).toMap,
+      metadata = Map(
         "provider"              -> "kafka",
         "topic"                 -> rec.topic(),
         "offset"                -> rec.offset().toString,
@@ -168,7 +157,6 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
         "serialized_value_size" -> rec.serializedValueSize().toString
       )
     )
-  }
 
   /** what to read: whole topics through the group, or explicit partitions from a position */
   private def subscription(topics: Seq[String], spec: SubscriptionSpec)(using ec: ExecutionContext): Future[org.apache.pekko.kafka.Subscription] = {
@@ -201,7 +189,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
   }
 
   // the consumer itself is only created once the source runs, and stopped with it
-  private def subscribeTo(topics: Seq[String], spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] = subscription(topics, spec).map { sub =>
+  private def subscribeTo(topics: Seq[String], spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] = {
     val offsetTo = spec.options.select("offset_to").asOpt[String].map(_.toLong)
     // without a group, a group of its own: the subscriber gets every event, and nothing it commits matters
     val groupId  = spec.group.getOrElse(s"otoroshi-${UUID.randomUUID()}")
@@ -212,35 +200,53 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
       .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, (spec.group.isDefined && spec.delivery == DeliveryMode.AtMostOnce).toString)
       .applyOnWithOpt(spec.options.select("client_id").asOpt[String])((s, id) => s.withClientId(id))
       .applyOnWithOpt(spec.options.select("group_instance_id").asOpt[String])((s, id) => s.withGroupInstanceId(id))
-    val events: Source[ReceivedEvent, ?] = spec.delivery match {
-      case DeliveryMode.AtMostOnce  =>
-        Consumer.plainSource(local, sub).map(rec => ReceivedEvent.unacked(toEvent(rec)))
-      case DeliveryMode.AtLeastOnce =>
-        given Materializer = env.otoroshiMaterializer
-        // the acks go through a committer, in batches; once the subscription ends, what is left is committed
-        val (acks, _) = Source
-          .queue[CommittableOffset](10000)
-          .toMat(Committer.sink(CommitterSettings(env.analyticsActorSystem).withMaxBatch(100).withMaxInterval(1.second)))(Keep.both)
-          .run()
-        // the consumer stays up a while after the source stops (stop-timeout) to let these commits through
-        Subscribed(
-          Consumer
-            .committableSource(local, sub)
-            .map { message =>
-              new ReceivedEvent(
-                toEvent(message.record),
-                () =>
-                  acks.offer(message.committableOffset) match {
-                    case QueueOfferResult.Enqueued => Future.unit
-                    case other                     => Future.failed(new IllegalStateException(s"could not ack kafka offset ${message.record.offset()}: $other"))
-                  }
-              )
+    val events: Future[Source[ReceivedEvent, ?]] = spec.from match {
+      // resuming: right after the positions given, the partitions they do not name from now on
+      case StartFrom.Positions(positions) =>
+        val resumeAt = (assigned: Set[TopicPartition]) =>
+          Future.successful(assigned.flatMap(tp => positions.get(s"${tp.topic()}:${tp.partition()}").map(offset => tp -> (offset + 1L))).toMap)
+        val all      = Subscriptions.topics(topics.toSet)
+        Future.successful(spec.delivery match {
+          case DeliveryMode.AtMostOnce  =>
+            Consumer.plainPartitionedManualOffsetSource(local, all, resumeAt).flatMapMerge(1024, _._2).map(rec => ReceivedEvent.unacked(toEvent(rec)))
+          case DeliveryMode.AtLeastOnce =>
+            committed(Consumer.committablePartitionedManualOffsetSource(local, all, resumeAt).flatMapMerge(1024, _._2))
+        })
+      case _                              =>
+        subscription(topics, spec).map { sub =>
+          spec.delivery match {
+            case DeliveryMode.AtMostOnce  => Consumer.plainSource(local, sub).map(rec => ReceivedEvent.unacked(toEvent(rec)))
+            case DeliveryMode.AtLeastOnce => committed(Consumer.committableSource(local, sub))
+          }
+        }
+    }
+    events.map { source =>
+      offsetTo match {
+        case None     => source
+        case Some(to) => source.takeWhile(_.message.metadata.get("offset").exists(_.toLong <= to), false)
+      }
+    }
+  }
+
+  /** at least once: the acks go through a committer, in batches; once the subscription ends, what is left is committed */
+  private def committed(messages: Source[ConsumerMessage.CommittableMessage[Array[Byte], Array[Byte]], ?])(using env: Env): Source[ReceivedEvent, ?] = {
+    given Materializer = env.otoroshiMaterializer
+    val (acks, _) = Source
+      .queue[CommittableOffset](10000)
+      .toMat(Committer.sink(CommitterSettings(env.analyticsActorSystem).withMaxBatch(100).withMaxInterval(1.second)))(Keep.both)
+      .run()
+    // the consumer stays up a while after the source stops (stop-timeout) to let these commits through
+    Subscribed(
+      messages.map { message =>
+        new ReceivedEvent(
+          toEvent(message.record),
+          () =>
+            acks.offer(message.committableOffset) match {
+              case QueueOfferResult.Enqueued => Future.unit
+              case other                     => Future.failed(new IllegalStateException(s"could not ack kafka offset ${message.record.offset()}: $other"))
             }
-        )(() => acks.complete())
-    }
-    offsetTo match {
-      case None     => events
-      case Some(to) => events.takeWhile(_.event.vendorMetadata.get("offset").exists(_.toLong <= to), false)
-    }
+        )
+      }
+    )(() => acks.complete())
   }
 }

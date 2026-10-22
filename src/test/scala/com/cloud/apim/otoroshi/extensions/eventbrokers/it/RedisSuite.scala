@@ -54,7 +54,7 @@ class RedisSuite extends BrokerSuite {
     publish(mine, 42, run)
     val events   = await(received)
     assertEquals(numbers(events), Seq(42))
-    assertEquals((events.head \ "vendor_metadata" \ "channel").as[String], mine)
+    assertEquals(ext(events.head, "redischannel"), Some(mine))
   }
 
   test("a pattern gets every channel it matches") {
@@ -64,8 +64,8 @@ class RedisSuite extends BrokerSuite {
     keepPublishing(received)(n => publish(s"$prefix.${if (n % 2 == 0) "a" else "b"}", n, run))
     val events   = await(received)
     assertEquals(events.size, 2, events.toString)
-    assert(events.forall(e => (e \ "vendor_metadata" \ "pattern").asOpt[String].contains(s"$prefix.*")), events.toString)
-    assert(events.forall(e => (e \ "vendor_metadata" \ "channel").as[String].startsWith(s"$prefix.")), events.toString)
+    assert(events.forall(e => ext(e, "redispattern").contains(s"$prefix.*")), events.toString)
+    assert(events.forall(e => ext(e, "redischannel").exists(_.startsWith(s"$prefix."))), events.toString)
   }
 
   test("a subscriber that goes away lets go of its subscription") {
@@ -83,5 +83,19 @@ class RedisSuite extends BrokerSuite {
     val body = await(res.entity.toStrict(10.seconds)).data.utf8String
     assertEquals(res.status.intValue(), 400, body)
     assert(body.contains("cannot acknowledge"), body)
+  }
+
+  test("a message published by someone else is read as a cloudevent") {
+    val channel  = uniq("foreign")
+    val received = collect(Gateway.ndjson(consumer, "/" + opts("channel" -> channel)), take = 1, within = 20.seconds)
+    val client   = io.lettuce.core.RedisClient.create(Brokers.redisUri)
+    val conn     = client.connect()
+    try keepPublishing(received)(n => { conn.sync().publish(channel, Json.stringify(message(n, "foreign"))); () })
+    finally { conn.close(); client.shutdown() }
+    val event    = await(received).head
+    assertEquals((event \ "type").as[String], "com.cloud-apim.event-brokers.message")
+    assertEquals((event \ "source").as[String], s"/redis/$channel")
+    assertEquals((event \ "datacontenttype").as[String], "application/json")
+    assertEquals((payload(event) \ "run").as[String], "foreign")
   }
 }

@@ -40,7 +40,7 @@ class MqttSuite extends BrokerSuite {
     keepPublishing(received)(n => publish(topic, n, run))
     val events   = await(received)
     assertConsecutive(numbers(events), 3)
-    assertEquals((events.head \ "vendor_metadata" \ "topic").asOpt[String], Some(topic))
+    assertEquals(ext(events.head, "mqtttopic"), Some(topic))
   }
 
   test("does not retain what it publishes unless asked to") {

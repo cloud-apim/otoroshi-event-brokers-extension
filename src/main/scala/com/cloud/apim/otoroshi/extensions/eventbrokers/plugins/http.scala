@@ -1,10 +1,9 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import org.apache.pekko.stream.Materializer
-import org.apache.pekko.stream.scaladsl.{Framing, Source}
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.EventWrapper
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.CloudEventBindings
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, Ingest, Output, OutputFormat, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -13,6 +12,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
+import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future}
 
 class HttpEventsIngester extends NgBackendCall {
@@ -38,41 +38,6 @@ class HttpEventsIngester extends NgBackendCall {
     ().vfuture
   }
 
-  private def bodySource(ctx: NgbBackendCallContext, opts: JsObject)(using env: Env, ec: ExecutionContext): (Source[EventWrapper, ?], String) = {
-    given mat: Materializer = env.otoroshiMaterializer
-    val contentTypeOpt = ctx.request.contentType
-    val isBodyStreamed = ctx.request.transferEncoding.contains("chunked") || opts.select("body-streamed").asOpt[String].contains("true")
-    val delimiter = opts.select("delimiter").asOpt[String].getOrElse("\n")
-    if (isBodyStreamed) {
-      val source = ctx.request.body
-        .via(Framing.delimiter(ByteString(delimiter), 32 * 1024 * 1024))
-        .map { chunk =>
-          contentTypeOpt match {
-            case Some("application/vnd.cloud-apim-event-broker+json") => EventWrapper.fromJson(chunk.utf8String.parseJson)
-            case Some("application/json") => EventWrapper(None, chunk, "text", "json", Map.empty, Map.empty)
-            case Some("text/plain") => EventWrapper(None, chunk, "text", "text", Map.empty, Map.empty)
-            case _ => EventWrapper(None, chunk, "text", "binary", Map.empty, Map.empty)
-          }
-        }
-      (source, "application/x-ndjson")
-    } else {
-      (Source.futureSource(ctx.request.body.runFold(ByteString.empty)(_ ++ _).map { bodyRaw =>
-        contentTypeOpt match {
-          case Some("application/vnd.cloud-apim-event-broker+json") => {
-            val parsed = bodyRaw.utf8String.parseJson
-            parsed.select("events").asOpt[Seq[JsObject]] match {
-              case None => Source.single(EventWrapper.fromJson(parsed))
-              case Some(seq) => Source(seq.map(v => EventWrapper.fromJson(v)).toList)
-            }
-          }
-          case Some("application/json") => Source.single(EventWrapper(None, bodyRaw, "text", "json", Map.empty, Map.empty))
-          case Some("text/plain") => Source.single(EventWrapper(None, bodyRaw, "text", "text", Map.empty, Map.empty))
-          case _ => Source.single(EventWrapper(None, bodyRaw, "text", "binary", Map.empty, Map.empty))
-        }
-      }), "application/json")
-    }
-  }
-
   override def callBackend(ctx: NgbBackendCallContext, delegates: () => Future[Either[NgProxyEngineError, BackendCallResponse]])(using env: Env, ec: ExecutionContext, mat: Materializer): Future[Either[NgProxyEngineError, BackendCallResponse]] = {
     val config = ctx.cachedConfig(internalName)(EventBrokerPluginConfig.format).getOrElse(EventBrokerPluginConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
@@ -83,11 +48,15 @@ class HttpEventsIngester extends NgBackendCall {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-          val (inSource, responseContentType) = bodySource(ctx, opts)
-          val outSource = PluginUtils
-            .publishAll(lease.client, inSource, opts)
-            .map(result => s"${result.json.stringify}\n".byteString)
-          Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(outSource)).as(responseContentType)), None)).vfuture
+          Ingest.events(ctx.request, ctx.route, opts).map {
+            case Left(error) =>
+              lease.release()
+              Left(PluginUtils.badRequest(error))
+            case Right(events) =>
+              // one json line per event, in order
+              val results = PluginUtils.publishAll(lease.client, events, opts).map(result => s"${result.stringify}\n".byteString)
+              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(results)).as("application/x-ndjson")), None))
+          }
         }
       }
     }
@@ -125,14 +94,25 @@ class HttpEventsConsumer extends NgBackendCall {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-          val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          PluginUtils.subscribe(lease.client, opts).map {
+          val kind = lease.client.config.kind
+          OutputFormat.from(opts) match {
             case Left(error) =>
               lease.release()
-              Left(error)
-            case Right(events) =>
-              val source = PluginUtils.handOver(events)(w => w.httpSerialize(enriched) ++ ByteString("\n")).withStreamOptions(opts)
-              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("application/x-nd-event")), None))
+              Left(PluginUtils.badRequest(error)).vfuture
+            case Right(format) =>
+              PluginUtils.subscribe(lease.client, opts).map {
+                case Left(error) =>
+                  lease.release()
+                  Left(error)
+                case Right(events) =>
+                  val lines  = PluginUtils.handOver(events)(r => Output.ndjson(CloudEventBindings.fromMessage(r.message, kind), format)).withStreamOptions(opts)
+                  // an empty line from time to time, when asked: keeps idle proxies from cutting the stream
+                  val source = opts.select("heartbeat").asOpt[String].flatMap(_.toLongOption).filter(_ > 0) match {
+                    case Some(every) => lines.keepAlive(every.millis, () => ByteString("\n"))
+                    case None        => lines
+                  }
+                  Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as(Output.contentType(format))), None))
+              }
           }
         }
       }

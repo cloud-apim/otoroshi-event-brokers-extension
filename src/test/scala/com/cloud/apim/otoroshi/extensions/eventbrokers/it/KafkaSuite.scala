@@ -50,8 +50,8 @@ class KafkaSuite extends BrokerSuite {
     (0 until 3).foreach(n => publish(topic, n, run))
     val received = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "auto_offset_reset" -> "earliest")), take = 3))
     assertEquals(numbers(received), Seq(0, 1, 2))
-    assertEquals(received.map(e => (e \ "vendor_metadata" \ "topic").as[String]).distinct, Seq(topic))
-    assertEquals(received.map(e => (e \ "vendor_metadata" \ "offset").as[String]), Seq("0", "1", "2"))
+    assertEquals(received.flatMap(e => ext(e, "kafkatopic")).distinct, Seq(topic))
+    assertEquals(received.flatMap(e => ext(e, "kafkaoffset")), Seq("0", "1", "2"))
   }
 
   test("sse consumer: one event per message") {
@@ -71,12 +71,13 @@ class KafkaSuite extends BrokerSuite {
     assertEquals(numbers(received.map(Json.parse)), Seq(0, 1, 2))
   }
 
-  test("text bodies keep their content type even with a charset".fail) {
+  test("text bodies keep their content type, charset included") {
     val topic           = uniq("text")
     val (status, lines) = Gateway.post(ingester, "/" + opts("topic" -> topic), "hello", ctype = "text/plain; charset=UTF-8")
     assertEquals(status, 200, lines.toString)
     val received        = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "auto_offset_reset" -> "earliest")), take = 1))
-    assertEquals((received.head \ "value" \ "type").asOpt[String], Some("text"), received.toString)
+    assertEquals((received.head \ "datacontenttype").asOpt[String], Some("text/plain; charset=UTF-8"), received.toString)
+    assertEquals((received.head \ "data").asOpt[String], Some("hello"))
   }
 
   test("consumes every partition of a topic") {
@@ -149,5 +150,143 @@ class KafkaSuite extends BrokerSuite {
     val res = await(Gateway.request(consumer, path = "/" + opts("topic" -> uniq("bad"), "delivery" -> "exactly-once")))
     res.discardEntityBytes()
     assertEquals(res.status.intValue(), 400)
+  }
+
+  /** what a plain kafka consumer, outside of otoroshi, reads from the topic */
+  def nativeRecords(topic: String, count: Int): Seq[org.apache.kafka.clients.consumer.ConsumerRecord[Array[Byte], Array[Byte]]] = {
+    import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+    val props = new Properties()
+    props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, Brokers.kafka.getBootstrapServers)
+    props.put(ConsumerConfig.GROUP_ID_CONFIG, uniq("native"))
+    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+    props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.ByteArrayDeserializer].getName)
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.ByteArrayDeserializer].getName)
+    val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](props)
+    try {
+      consumer.subscribe(java.util.List.of(topic))
+      val deadline = System.currentTimeMillis() + 20000L
+      var records  = Seq.empty[org.apache.kafka.clients.consumer.ConsumerRecord[Array[Byte], Array[Byte]]]
+      while (records.size < count && System.currentTimeMillis() < deadline) records = records ++ consumer.poll(java.time.Duration.ofMillis(200)).asScala
+      records
+    } finally consumer.close()
+  }
+
+  def header(record: org.apache.kafka.clients.consumer.ConsumerRecord[Array[Byte], Array[Byte]], name: String): Option[String] =
+    Option(record.headers().lastHeader(name)).map(h => new String(h.value(), "UTF-8"))
+
+  test("a cloudevent goes through as it is, in ce_ headers any kafka consumer reads") {
+    val topic           = uniq("cloudevent")
+    val event           = Json.obj(
+      "specversion"     -> "1.0",
+      "id"              -> uniq("id"),
+      "source"          -> "/acme/orders",
+      "type"            -> "com.acme.order.created",
+      "subject"         -> "o-42",
+      "partitionkey"    -> "o-42",
+      "tenant"          -> "acme",
+      "datacontenttype" -> "application/json",
+      "data"            -> message(0, "ce")
+    )
+    val (status, lines) = Gateway.post(ingester, "/" + opts("topic" -> topic), Json.stringify(event), ctype = "application/cloudevents+json")
+    assertEquals(status, 200, lines.toString)
+    assertEquals((lines.head \ "id").as[String], (event \ "id").as[String])
+    val received        = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "from" -> "earliest")), take = 1)).head
+    Seq("id", "source", "type", "subject", "partitionkey", "tenant", "datacontenttype").foreach(name => assertEquals(received \ name, event \ name, name))
+    assertEquals(payload(received), message(0, "ce"))
+    val record          = nativeRecords(topic, 1).head
+    assertEquals(header(record, "ce_id"), (event \ "id").asOpt[String])
+    assertEquals(header(record, "ce_type"), Some("com.acme.order.created"))
+    assertEquals(header(record, "content-type"), Some("application/json"))
+    assertEquals(new String(record.key(), "UTF-8"), "o-42")
+    assertEquals(Json.parse(record.value()), message(0, "ce"))
+  }
+
+  test("http binary mode: the attributes in ce- headers, the body as data") {
+    val topic           = uniq("binary")
+    val (status, lines) = Gateway.post(
+      ingester,
+      "/" + opts("topic" -> topic),
+      "hello",
+      ctype = "text/plain; charset=UTF-8",
+      headers = Seq("ce-id" -> "b-1", "ce-type" -> "com.acme.greeting", "ce-source" -> "/greeter", "ce-lang" -> "en")
+    )
+    assertEquals(status, 200, lines.toString)
+    val received        = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "from" -> "earliest")), take = 1)).head
+    assertEquals((received \ "id").as[String], "b-1")
+    assertEquals((received \ "type").as[String], "com.acme.greeting")
+    assertEquals((received \ "source").as[String], "/greeter")
+    assertEquals((received \ "lang").as[String], "en")
+    assertEquals((received \ "data").as[String], "hello")
+  }
+
+  test("without attributes, the event gets an id, the route as source, and a time") {
+    val topic           = uniq("defaults")
+    val (status, lines) = Gateway.post(ingester, "/" + opts("topic" -> topic), Json.stringify(message(0, "d")))
+    assertEquals(status, 200, lines.toString)
+    val received        = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "from" -> "earliest")), take = 1)).head
+    assertEquals((received \ "id").as[String], (lines.head \ "id").as[String])
+    assertEquals((received \ "source").as[String], s"/otoroshi/routes/${ingester.id}")
+    assertEquals((received \ "type").as[String], "com.cloud-apim.event-brokers.event")
+    assert((received \ "time").asOpt[String].isDefined, received.toString)
+  }
+
+  test("a batch of cloudevents: one result per event, with its id") {
+    val topic           = uniq("ce-batch")
+    val batch           = JsArray((0 until 3).map { n =>
+      Json.obj("specversion" -> "1.0", "id" -> s"batch-$n", "source" -> "/s", "type" -> "t", "data" -> message(n, "batch"))
+    })
+    val (status, lines) = Gateway.post(ingester, "/" + opts("topic" -> topic), Json.stringify(batch), ctype = "application/cloudevents-batch+json")
+    assertEquals(status, 200, lines.toString)
+    assertEquals(lines.map(l => (l \ "id").as[String]), Seq("batch-0", "batch-1", "batch-2"))
+    assertEquals(lines.map(l => (l \ "details" \ "offset").as[Long]), Seq(0L, 1L, 2L))
+  }
+
+  test("what is not a cloudevent is refused with a 400") {
+    val (status, lines) = Gateway.post(ingester, "/" + opts("topic" -> uniq("invalid")), """{"specversion":"1.0","id":"1"}""", ctype = "application/cloudevents+json")
+    assertEquals(status, 400, lines.toString)
+    assert(lines.toString.contains("source is required"), lines.toString)
+  }
+
+  test("a message from another producer is read as a cloudevent: its position as id") {
+    import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
+    val topic    = uniq("foreign")
+    val props    = new Properties()
+    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, Brokers.kafka.getBootstrapServers)
+    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.ByteArraySerializer].getName)
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[org.apache.kafka.common.serialization.ByteArraySerializer].getName)
+    val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
+    try producer.send(new ProducerRecord(topic, Json.stringify(message(0, "foreign")).getBytes("UTF-8"))).get()
+    finally producer.close()
+    val received = await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "from" -> "earliest")), take = 1)).head
+    assertEquals((received \ "id").as[String], s"$topic-0-0")
+    assertEquals((received \ "source").as[String], s"/kafka/$topic")
+    assertEquals((received \ "type").as[String], "com.cloud-apim.event-brokers.message")
+    assertEquals((received \ "datacontenttype").as[String], "application/json")
+    assertEquals(payload(received), message(0, "foreign"))
+  }
+
+  test("raw: the data alone") {
+    val topic = uniq("raw")
+    val run   = uniq("run")
+    (0 until 2).foreach(n => publish(topic, n, run))
+    val lines = await(collect(Gateway.lines(consumer, "/" + opts("topic" -> topic, "from" -> "earliest", "format" -> "raw")).filter(_.nonEmpty), take = 2))
+    assertEquals(lines.map(Json.parse), Seq(message(0, run), message(1, run)))
+  }
+
+  test("sse: the event is named after its type, and a client coming back resumes right after what it got") {
+    val topic  = uniq("resume")
+    val run    = uniq("run")
+    (0 until 5).foreach(n => publish(topic, n, run))
+    val first  = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic, "from" -> "earliest", "take" -> 2)).filter(_.id.isDefined), take = 2))
+    assertEquals(numbers(first.map(e => Json.parse(e.data))), Seq(0, 1))
+    assertEquals(first.flatMap(_.field("event")).distinct, Seq("com.cloud-apim.event-brokers.event"))
+    val rest   = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 3))
+    assertEquals(numbers(rest.map(e => Json.parse(e.data))), Seq(2, 3, 4))
+  }
+
+  test("sse: a heartbeat while nothing happens") {
+    val beats = await(collect(Gateway.sse(sse, "/" + opts("topic" -> uniq("quiet"), "heartbeat" -> 200)), take = 2, within = 5.seconds))
+    assertEquals(beats.size, 2, beats.toString)
+    assert(beats.forall(_.lines.forall(_.startsWith(":"))), beats.toString)
   }
 }

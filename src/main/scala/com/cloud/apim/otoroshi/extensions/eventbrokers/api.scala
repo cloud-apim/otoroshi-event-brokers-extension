@@ -4,141 +4,25 @@ import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
 import otoroshi.env.Env
-import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
-import otoroshi.utils.syntax.implicits._
+import play.api.libs.json.{JsObject, JsValue, Json}
 
 import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future}
 
-object EventWrapper {
-  def fromJson(json: JsValue): EventWrapper = {
-    val keyContentType = json.select("key").select("type").asOpt[String].getOrElse("binary")
-    val dataContentType = json.select("value").select("type").asOpt[String].getOrElse("binary")
-    val key: Option[ByteString] = keyContentType.toLowerCase() match {
-      case "text" => json.select("key").select("data").asOpt[String].map(_.byteString)
-      case "text/plain" => json.select("key").select("data").asOpt[String].map(_.byteString)
-      case "json" => json.select("key").select("data").asOpt[JsValue].map(_.stringify.byteString)
-      case "application/json" => json.select("key").select("data").asOpt[JsValue].map(_.stringify.byteString)
-      case "binary" => json.select("key").select("data").asOpt[String].map(_.byteString.decodeBase64)
-      case "application/octet-stream" => json.select("key").select("data").asOpt[String].map(_.byteString.decodeBase64)
-      case _ => None
-    }
-    val data: Option[ByteString] = dataContentType.toLowerCase() match {
-      case "text" =>                     json.select("value").select("data").asOpt[String].map(_.byteString)
-      case "text/plain" =>               json.select("value").select("data").asOpt[String].map(_.byteString)
-      case "json" =>                     json.select("value").select("data").asOpt[JsValue].map(_.stringify.byteString)
-      case "application/json" =>         json.select("value").select("data").asOpt[JsValue].map(_.stringify.byteString)
-      case "binary" =>                   json.select("value").select("data").asOpt[String].map(_.byteString.decodeBase64)
-      case "application/octet-stream" => json.select("value").select("data").asOpt[String].map(_.byteString.decodeBase64)
-      case _ => None
-    }
-    EventWrapper(
-      key = key,
-      data = data.getOrElse(ByteString.empty),
-      keyContentType = keyContentType,
-      dataContentType = dataContentType,
-      headers = json.select("headers").asOpt[Map[String, String]].getOrElse(Map.empty),
-      vendorMetadata = json.select("vendor_metadata").asOpt[Map[String, String]].getOrElse(Map.empty),
-    )
-  }
-}
-
-case class EventWrapper(
-  key: Option[ByteString],
-  data: ByteString,
-  keyContentType: String,
-  dataContentType: String,
-  headers: Map[String, String],
-  vendorMetadata: Map[String, String]
-) {
-  def wsMessage(enriched: Boolean): play.api.http.websocket.Message = {
-    if (enriched) {
-      play.api.http.websocket.TextMessage(json.stringify)
-    } else {
-      play.api.http.websocket.BinaryMessage(data)
-    }
-  }
-  def sseSerialize(enriched: Boolean): ByteString = {
-    if (enriched) {
-      key match {
-        case Some(id) => {
-          val key: String = keyContentType.toLowerCase() match {
-            case "text" => id.utf8String
-            case "text/plain" => id.utf8String
-            case "json" => id.utf8String
-            case "application/json" => id.utf8String
-            case _ => id.encodeBase64.utf8String
-          }
-          s"id: ${key}\ndata: ${json.stringify}\n\n".byteString
-        } // TODO: support event: kind
-        case None => s"data: ${json.stringify}\n\n".byteString
-      }
-    } else {
-      key match {
-        case Some(id) => {
-          val key: String = keyContentType.toLowerCase() match {
-            case "text" => id.utf8String
-            case "text/plain" => id.utf8String
-            case "json" => id.utf8String
-            case "application/json" => id.utf8String
-            case _ => id.encodeBase64.utf8String
-          }
-          s"id: ${key}\ndata: ${data.utf8String}\n\n".byteString
-        } // TODO: support event: kind
-        case None => s"data: ${data.utf8String}\n\n".byteString
-      }
-    }
-  }
-  def httpSerialize(enriched: Boolean): ByteString = {
-    if (enriched) {
-      json.stringify.byteString
-    } else {
-      data
-    }
-  }
-  def jsonKey: JsValue = {
-    key match {
-      case None => JsNull
-      case Some(key) => {
-        val data = keyContentType.toLowerCase() match {
-          case "text" => key.utf8String.json
-          case "text/plain" => key.utf8String.json
-          case "json" => key.utf8String.parseJson
-          case "application/json" => key.utf8String.parseJson
-          case "binary" => key.encodeBase64.utf8String.json
-          case "application/octet-stream" => key.encodeBase64.utf8String.json
-          case _ => JsNull
-        }
-        Json.obj(
-          "type" -> keyContentType,
-          "data" -> data
-        )
-      }
-    }
-  }
-  def jsonValue: JsValue = {
-    val finaldata = dataContentType.toLowerCase() match {
-      case "text" => data.utf8String.json
-      case "text/plain" => data.utf8String.json
-      case "json" => data.utf8String.parseJson
-      case "application/json" => data.utf8String.parseJson
-      case "binary" => data.encodeBase64.utf8String.json
-      case "application/octet-stream" => data.encodeBase64.utf8String.json
-      case _ => JsNull
-    }
-    Json.obj(
-      "type" -> dataContentType,
-      "data" -> finaldata
-    )
-  }
-  def json: JsValue = Json.obj(
-    "key" -> jsonKey,
-    "value" -> jsonValue,
-    "headers" -> headers,
-    "timestamp" -> headers.get("timestamp").orElse(vendorMetadata.get("timestamp")).map(_.json).getOrElse(JsNull).asValue,
-    "vendor_metadata" -> vendorMetadata,
-  )
-}
+/**
+ * A message as a broker carries it. Built from a CloudEvent by its binding (`CloudEventBindings`)
+ * before being published, and turned back into one when received.
+ *
+ * `metadata`: on the way out, where the message goes when the call does not say (topic, partition,
+ * exchange, ...); on the way in, what the broker says of it (topic, offset, delivery tag, ...).
+ */
+final case class BrokerMessage(
+    key: Option[ByteString] = None,
+    data: ByteString = ByteString.empty,
+    /** what the broker carries along the payload: kafka headers, amqp application properties, pulsar properties */
+    headers: Map[String, String] = Map.empty,
+    metadata: Map[String, String] = Map.empty
+)
 
 /**
  * A client of one broker, for one version of one connection. Its lifecycle belongs to the
@@ -169,7 +53,7 @@ trait EventBrokerClient {
    * only a broken client fails the future. `opts` are the options of the call (topic, key, ...); an
    * event's own vendor metadata wins over them
    */
-  def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]]
+  def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]]
 
   /**
    * subscribes as `spec` says. the future fails when the subscription cannot be opened (no topic, a
@@ -262,6 +146,8 @@ enum StartFrom {
   case Timestamp(epochMillis: Long)
   /** from that offset, on every partition (or the one asked for) */
   case Offset(offset: Long)
+  /** right after these positions (`topic:partition` -> offset), what a client resuming gives back */
+  case Positions(positions: Map[String, Long])
 }
 
 /** what to subscribe to. topics are topics, queues or channels, as the broker calls them */
@@ -277,7 +163,7 @@ final case class SubscriptionSpec(
 )
 
 /** an event received from a broker, and how to acknowledge it */
-final class ReceivedEvent(val event: EventWrapper, onAck: () => Future[Unit]) {
+final class ReceivedEvent(val message: BrokerMessage, onAck: () => Future[Unit]) {
   private val acked = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** acknowledges the event to the broker. once: acking again does nothing */
@@ -286,7 +172,7 @@ final class ReceivedEvent(val event: EventWrapper, onAck: () => Future[Unit]) {
 
 object ReceivedEvent {
   /** for brokers with nothing to acknowledge */
-  def unacked(event: EventWrapper): ReceivedEvent = new ReceivedEvent(event, () => Future.unit)
+  def unacked(message: BrokerMessage): ReceivedEvent = new ReceivedEvent(message, () => Future.unit)
 }
 
 final case class PublishResult(error: Option[String] = None, details: Option[JsValue] = None) {

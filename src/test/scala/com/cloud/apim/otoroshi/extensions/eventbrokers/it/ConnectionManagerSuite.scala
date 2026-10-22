@@ -49,7 +49,7 @@ final class FakeClient(val config: EventBrokerConnection, broker: FakeBroker) ex
 
   override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = false, groups = false, replay = false, keys = false, headers = false)
 
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
     Future.successful(events.map(_ => PublishResult.done))
 
   override def subscribe(spec: SubscriptionSpec)(using env: Env, ec: ExecutionContext): Future[Source[ReceivedEvent, ?]] =

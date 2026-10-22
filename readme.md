@@ -32,23 +32,62 @@ events, or over a websocket. The brokers stay private, Otoroshi handles who may 
 Every plugin points to an **event broker connection**. Per-call options are read from query parameters
 and headers prefixed with `x-ca-event-broker-opts-` (`?x-ca-event-broker-opts-topic=orders`).
 
+### Events are CloudEvents
+
+Every event going in or out is a [CloudEvents 1.0](https://cloudevents.io/) event, whatever the broker.
+
+**What the ingester takes**, by `Content-Type`:
+
+| Content type | Is |
+|---|---|
+| `application/cloudevents+json` | one structured event |
+| `application/cloudevents-batch+json` | a JSON array of structured events |
+| anything else | one event in binary mode: the body is its data, the content type is its `datacontenttype` (charset included), its attributes come from `ce-` headers (`ce-id`, `ce-type`, `ce-source`, `ce-subject`, `ce-<extension>`) |
+| `application/vnd.cloud-apim-event-broker+json` | the format of the extension before CloudEvents, still read |
+
+A chunked body (or the `lines=true` option) is read line by line, each line one event. What a request
+does not say is filled in: a fresh `id`, `/otoroshi/routes/<route id>` as `source` (or the `source`
+option), `com.cloud-apim.event-brokers.event` as `type` (or the `type` option), now as `time`.
+
+**How events travel on each broker** (the CloudEvents protocol bindings):
+
+| Broker | Mode | Where the attributes are |
+|---|---|---|
+| Kafka | binary | `ce_*` headers, the data as the value, `content-type` header, `partitionkey` as the record key |
+| Pulsar | binary | `ce_*` properties, the data as the payload, `partitionkey` as the message key |
+| RabbitMQ | binary | `cloudEvents:*` application properties, the amqp `content-type` |
+| Redis, MQTT 3.1.1 | structured | no headers: the whole event as JSON in the payload |
+
+So a consumer outside Otoroshi (a Kafka consumer, a CloudEvents SDK) reads what the gateway publishes,
+and what another producer published is read as an event too: its `id` is its position when the broker
+has one (`<topic>-<partition>-<offset>` on Kafka), its `source` `/<kind>/<topic>`, its `type`
+`com.cloud-apim.event-brokers.message`, its content type guessed from the payload when nothing says it.
+Every event read carries what the broker says of the message as extensions: `kafkatopic`,
+`kafkapartition`, `kafkaoffset`, `rabbitmqroutingkey`, `rabbitmqredelivered`, `pulsarmessageid`,
+`redischannel`, `mqtttopic`, ...
+
+**What the consumers give**: the structured events (`format=cloudevents`, the default), or their data
+alone (`format=raw`).
+
 ### Publishing
 
-The ingester publishes the body as one event, the `events` of a
-`application/vnd.cloud-apim-event-broker+json` body as a batch, or a chunked body line by line. It
-answers one JSON line per event, in order, once the broker has taken it or refused it:
+The ingester answers one JSON line per event, in order, with the id of the event, once the broker has
+taken it or refused it:
 
 ```json
-{"published": true, "details": {"topic": "orders", "partition": 0, "offset": 42}}
-{"published": false, "error": "publish_error", "error_description": "no queue got the message: ..."}
+{"published": true, "id": "4f1c...", "details": {"topic": "orders", "partition": 0, "offset": 42}}
+{"published": false, "id": "77ab...", "error": "publish_error", "error_description": "no queue got the message: ..."}
+{"published": false, "error": "invalid_event", "error_description": "source is required"}
 ```
 
 A broker refusing one event does not fail the others. Kafka and Pulsar give the position of the
 message, RabbitMQ waits for the broker's confirm and reports the messages no queue gets (instead of
-dropping them), Redis gives how many subscribers got the message.
+dropping them), Redis gives how many subscribers got the message. A body that is not valid at all is
+refused with a `400`.
 
 Publish options: `topic` (`queue`, `exchange` and `routing_key` for RabbitMQ, `channel` for Redis),
-`key` and `partition` for Kafka, `qos` and `retained` for MQTT.
+`key` and `partition` for Kafka, `qos` and `retained` for MQTT, `source`, `type` and `subject` for the
+attributes the request does not give.
 
 ### Consuming
 
@@ -78,6 +117,15 @@ What each broker can do (anything else is refused with a `400`):
 | `from` / replay | `earliest`, `from_timestamp`, `offset_from` | no | `earliest` (new group), `from_timestamp` | no | no |
 
 Other options: `prefetch` (RabbitMQ, 100), `qos` (MQTT), `client_id` and `group_instance_id` (Kafka).
+
+The HTTP consumer streams `application/x-ndjson` (one event per line); `heartbeat=<millis>` adds an
+empty line when nothing happens. The **SSE consumer**:
+
+- names each event after its `type` (`event:`), and gives every line of the data its own `data:` field
+- sends a `: keep-alive` comment every 15 seconds without events (`heartbeat=<millis>`, `0` to stop)
+- gives each event an `id:`. On Kafka it holds the positions read on every partition: a client coming
+  back with it in `Last-Event-ID` (what `EventSource` does by itself) resumes right after what it got
+- answers with `Cache-Control: no-cache` and `X-Accel-Buffering: no`, so that no proxy holds the events
 
 ### Connections
 
@@ -301,7 +349,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 
 | Suites                                   | What they run against                                        | Needs   |
 |------------------------------------------|--------------------------------------------------------------|---------|
-| `EventWrapperSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite`, `SettingsSuite` | the code alone | nothing |
+| `CloudEventSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite`, `SettingsSuite` | the code alone | nothing |
 | `it.ConnectionManagerSuite`              | the connection lifecycle over fake brokers, on the env of an Otoroshi in the test jvm | nothing |
 | `it.ConnectionsApiSuite`                 | what the admin api accepts as connections, on an Otoroshi in the test jvm | nothing |
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
