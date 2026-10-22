@@ -3,7 +3,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 import org.apache.pekko.stream.Materializer
 import org.apache.pekko.util.ByteString
 import com.cloud.apim.otoroshi.extensions.eventbrokers.CloudEventBindings
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, Ingest, Output, OutputFormat, PluginUtils, withStreamOptions}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{CallOptions, EventBrokerPluginConfig, Ingest, Output, OutputFormat, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -46,15 +46,16 @@ class HttpEventsIngester extends NgBackendCall {
         Left(NgProxyEngineError.NgResultProxyEngineError.apply(Results.BadRequest(Json.obj("error" -> "bad_request", "error_description" -> "no body provided")))).vfuture
       case Some(extension) => extension.connections.acquire(config.ref) match {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
-        case Right(lease) => {
-          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+        case Right(lease) => PluginUtils.withOptions(config, ctx.request, ctx.attrs, lease) { opts =>
           Ingest.events(ctx.request, ctx.route, opts).map {
             case Left(error) =>
               lease.release()
               Left(PluginUtils.badRequest(error))
             case Right(events) =>
+              // where an event says it goes is under the same rules as the options of the caller
+              val allowed = events.map(_.flatMap(o => CallOptions.check(config, o.routing).toLeft(o)))
               // one json line per event, in order
-              val results = PluginUtils.publishAll(lease.client, events, opts).map(result => s"${result.stringify}\n".byteString)
+              val results = PluginUtils.publishAll(lease.client, allowed, opts).map(result => s"${result.stringify}\n".byteString)
               Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(results)).as("application/x-ndjson")), None))
           }
         }
@@ -92,8 +93,7 @@ class HttpEventsConsumer extends NgBackendCall {
       case None => Left(PluginUtils.extensionNotAvailable).vfuture
       case Some(extension) => extension.connections.acquire(config.ref) match {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
-        case Right(lease) => {
-          val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
+        case Right(lease) => PluginUtils.withOptions(config, ctx.request, ctx.attrs, lease) { opts =>
           val kind = lease.client.config.kind
           OutputFormat.from(opts) match {
             case Left(error) =>
