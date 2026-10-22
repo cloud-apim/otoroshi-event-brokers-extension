@@ -8,6 +8,7 @@ import org.testcontainers.containers.FixedHostPortGenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.*
 import play.api.libs.json.*
+import play.api.libs.ws.DefaultBodyWritables.writeableOf_String
 
 import java.net.ServerSocket
 import scala.concurrent.duration.*
@@ -65,7 +66,7 @@ class ConnectionsSuite extends BrokerSuite {
   def stateOf(id: String): Option[String] = (Gateway.connectionStatus(id).json \ "state").asOpt[String]
 
   test("an unreachable broker: reported unavailable, and its routes answer 503 at once") {
-    val id        = Gateway.createConnection("redis", Json.obj("uris" -> Json.arr(s"redis://127.0.0.1:${freePort()}")), waitConnected = false)
+    val id        = Gateway.createConnection("redis", Json.obj("uri" -> s"redis://127.0.0.1:${freePort()}"), waitConnected = false)
     eventually("unavailable")(stateOf(id).contains("unavailable"))
     val status    = Gateway.connectionStatus(id).json
     assert((status \ "error").asOpt[String].exists(_.nonEmpty), status.toString)
@@ -86,7 +87,7 @@ class ConnectionsSuite extends BrokerSuite {
 
   test("comes up as soon as its broker does, without a request to trigger it") {
     val port      = freePort()
-    val id        = Gateway.createConnection("redis", Json.obj("uris" -> Json.arr(s"redis://127.0.0.1:$port")), waitConnected = false)
+    val id        = Gateway.createConnection("redis", Json.obj("uri" -> s"redis://127.0.0.1:$port"), waitConnected = false)
     eventually("unavailable")(stateOf(id).contains("unavailable"))
     val late      = new FixedPortContainer("redis:7.4-alpine")
     late.withFixedExposedPort(port, 6379)
@@ -107,7 +108,7 @@ class ConnectionsSuite extends BrokerSuite {
   }
 
   test("a broker that stops answering: unavailable, 503, and back once it answers again") {
-    val id       = Gateway.createConnection("redis", Json.obj("uris" -> Json.arr(redisUri)))
+    val id       = Gateway.createConnection("redis", Json.obj("uri" -> redisUri))
     val ingester = Gateway.brokerRoute[HttpEventsIngester](id)
     assertEquals(publish(ingester, 0)._1, 200)
     docker.pauseContainerCmd(redis.getContainerId).exec()
@@ -125,11 +126,11 @@ class ConnectionsSuite extends BrokerSuite {
     // the probe that counts is a client too, the connections of the tests above are all deleted
     val before   = 1
     eventually("only the probe connected")(connectedClients() == before)
-    val id       = Gateway.createConnection("redis", Json.obj("uris" -> Json.arr(redisUri), "channel" -> "first"))
+    val id       = Gateway.createConnection("redis", Json.obj("uri" -> redisUri, "default_channel" -> "first"))
     eventually("one more client")(connectedClients() == before + 1)
     val ingester = Gateway.brokerRoute[HttpEventsIngester](id)
     val handle   = Gateway.extension.connections.handles(id).head
-    Gateway.updateConnection(id, "redis", Json.obj("uris" -> Json.arr(redisUri), "channel" -> "second"))
+    Gateway.updateConnection(id, "redis", Json.obj("uri" -> redisUri, "default_channel" -> "second"))
     // publish all along the switch: never refused
     var n        = 0
     val deadline = System.currentTimeMillis() + 15000L
@@ -148,5 +149,30 @@ class ConnectionsSuite extends BrokerSuite {
     val (status, lines) = publish(ingester, n)
     assertEquals(status, 500, lines.toString)
     assertEquals((lines.head \ "error").asOpt[String], Some("connection_not_found"))
+  }
+
+  test("secrets can come from a vault: resolved for the client, kept as references in the api") {
+    val secured = new Container("redis:7.4-alpine")
+    secured.withExposedPorts(6379)
+    secured.withCommand("redis-server", "--requirepass", "s3cr3t-from-the-vault")
+    secured.waitingFor(Wait.forLogMessage(".*Ready to accept connections.*", 1))
+    secured.start()
+    try {
+      // the local vault reads the env object of the global config
+      val patch = Json.arr(Json.obj("op" -> "replace", "path" -> "/env", "value" -> Json.obj("event_brokers_it" -> Json.obj("redis_password" -> "s3cr3t-from-the-vault"))))
+      val res   = await(Gateway.admin("/api/globalconfig").patch(Json.stringify(patch)))
+      assert(res.status < 300, res.body)
+      val uri       = s"redis://${secured.getHost}:${secured.getMappedPort(6379)}"
+      val reference = "${vault://local/event_brokers_it/redis_password}"
+      val id        = Gateway.createConnection("redis", Json.obj("uri" -> uri, "password" -> reference))
+      val ingester  = Gateway.brokerRoute[HttpEventsIngester](id)
+      assertEquals(publish(ingester, 0)._1, 200)
+      assertEquals((await(Gateway.admin(s"${Gateway.connectionsPath}/$id").get()).json \ "settings" \ "password").as[String], reference)
+      // and the password was needed
+      val without   = Gateway.createConnection("redis", Json.obj("uri" -> uri), waitConnected = false)
+      eventually("refused without the password", 20.seconds)(stateOf(without).contains("unavailable"))
+      Gateway.deleteConnection(id)
+      Gateway.deleteConnection(without)
+    } finally secured.stop()
   }
 }

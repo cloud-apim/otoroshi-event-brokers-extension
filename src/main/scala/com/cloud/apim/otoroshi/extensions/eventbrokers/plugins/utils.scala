@@ -80,10 +80,18 @@ object PluginUtils {
       )
   }
 
-  /** the broker refused to open a stream (a consumer it does not allow, a queue that does not exist, ...) */
-  def consumeError(e: Throwable): NgProxyEngineError = NgProxyEngineError.NgResultProxyEngineError(
-    Results.BadGateway(Json.obj("error" -> "consume_error", "error_description" -> ConnectionManager.describe(e)))
-  )
+  /**
+   * the stream could not be opened: the call misses what it needs (no topic anywhere), or the broker
+   * refused it (a consumer it does not allow, a queue that does not exist, ...)
+   */
+  def consumeError(e: Throwable): NgProxyEngineError = e match {
+    case _: IllegalArgumentException =>
+      NgProxyEngineError.NgResultProxyEngineError(Results.BadRequest(Json.obj("error" -> "bad_request", "error_description" -> e.getMessage)))
+    case _                           =>
+      NgProxyEngineError.NgResultProxyEngineError(
+        Results.BadGateway(Json.obj("error" -> "consume_error", "error_description" -> ConnectionManager.describe(e)))
+      )
+  }
 
   def buildOpts(req: NgPluginHttpRequest, localConfig: Map[String, String], includeQuery: Boolean, includeHeaders: Boolean): JsObject = {
     val query: Map[String, String] = if (!includeQuery) Map.empty else req.uri.query().toMap.collect {

@@ -14,10 +14,10 @@ class PulsarSuite extends BrokerSuite {
   lazy val connection: String = Gateway.createConnection(
     "pulsar",
     Json.obj(
-      "uri"       -> Brokers.pulsar.getPulsarBrokerUrl,
-      "tenant"    -> "public",
-      "namespace" -> "default",
-      "topic"     -> "default-topic"
+      "service_url"   -> Brokers.pulsar.getPulsarBrokerUrl,
+      "tenant"        -> "public",
+      "namespace"     -> "default",
+      "default_topic" -> "default-topic"
     )
   )
   lazy val ingester = Gateway.brokerRoute[HttpEventsIngester](connection)

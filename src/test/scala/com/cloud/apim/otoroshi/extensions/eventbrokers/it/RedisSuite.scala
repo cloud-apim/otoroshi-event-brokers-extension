@@ -9,7 +9,7 @@ class RedisSuite extends BrokerSuite {
 
   override def startBroker(): Unit = { Brokers.redis; () }
 
-  lazy val connection: String = Gateway.createConnection("redis", Json.obj("uris" -> Json.arr(Brokers.redisUri), "channel" -> "default-channel"))
+  lazy val connection: String = Gateway.createConnection("redis", Json.obj("uri" -> Brokers.redisUri, "default_channel" -> "default-channel"))
   lazy val ingester           = Gateway.brokerRoute[HttpEventsIngester](connection)
   lazy val consumer           = Gateway.brokerRoute[HttpEventsConsumer](connection)
 

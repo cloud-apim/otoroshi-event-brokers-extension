@@ -1,6 +1,6 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, KafkaSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, DescribeClusterOptions}
 import org.apache.kafka.clients.consumer.ConsumerConfig
@@ -8,16 +8,13 @@ import org.apache.kafka.clients.producer.{Callback, Producer, ProducerRecord, Re
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.header.{Header, Headers}
 import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
-import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import org.apache.pekko.kafka.scaladsl.Consumer
 import org.apache.pekko.kafka.{ConsumerSettings, ProducerSettings, Subscriptions}
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
-import otoroshi.events.KafkaConfig
 import otoroshi.events.KafkaSettings.kafkaSettings
-import otoroshi.utils.http.MtlsConfig
 import otoroshi.utils.syntax.implicits._
 import play.api.libs.json.{JsObject, JsValue, Json}
 
@@ -28,21 +25,10 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.Try
 import scala.util.control.NonFatal
 
-class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends EventBrokerClient {
+class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettings, env: Env) extends EventBrokerClient {
 
   // TODO: handle post of Json bodies with kafka vnd format, so we could extract keys
-  val kconfig = KafkaConfig.format.reads(config.settings).getOrElse(KafkaConfig(
-    servers = Seq("127.0.0.1:9093"),
-    keyPass = None,
-    keystore = None,
-    truststore = None,
-    sendEvents = true,
-    hostValidation = false,
-    topic = "topic1",
-    mtlsConfig = MtlsConfig(),
-    securityProtocol = SecurityProtocol.PLAINTEXT.name,
-    saslConfig = None
-  ))
+  private val kconfig = settings.kafkaConfig
 
   // lazy val logger = play.api.Logger("KafkaBrokerClient")
 
@@ -99,7 +85,8 @@ class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends Eve
     val promise = Promise[RecordMetadata]()
     val topic = event.vendorMetadata.get("topic")
       .orElse(opts.select("topic").asOpt[String])
-      .getOrElse(kconfig.topic)
+      .orElse(settings.defaultTopic)
+      .getOrElse(throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic"))
     val key = event.key
       .orElse(event.vendorMetadata.get("key").map(_.byteString))
       .orElse(opts.select("key").asOpt[String].map(_.byteString))
@@ -162,14 +149,17 @@ class KafkaBrokerClient(val config: EventBrokerConnection, env: Env) extends Eve
 
     import scala.jdk.CollectionConverters._
 
-    val topics = opts.select("topics").asOpt[String].map(_.split(",").map(_.trim).toSeq).getOrElse(Seq.empty) ++ Seq(opts.select("topic").asOpt[String].getOrElse(kconfig.topic)).flatMap(_.split(",").map(_.trim))
-    val offsetFromOpt = opts.select("offset_from").asOpt[String].orElse(config.settings.select("offset_from").asOpt[String]).map(_.toLong)
-    val offsetToOpt = opts.select("offset_to").asOpt[String].orElse(config.settings.select("offset_to").asOpt[String]).map(_.toLong)
-    val groupIdOpt = opts.select("group_id").asOpt[String].orElse(config.settings.select("group_id").asOpt[String]).getOrElse(UUID.randomUUID().toString).some
-    val partitionOpt = opts.select("partition").asOpt[String].orElse(config.settings.select("partition").asOpt[String]).map(_.toInt)
-    val clientIdOpt = opts.select("client_id").asOpt[String].orElse(config.settings.select("client_id").asOpt[String])
-    val groupInstanceIdOpt = opts.select("group_instance_id").asOpt[String].orElse(config.settings.select("group_instance_id").asOpt[String])
-    val autoOffsetResetOpt = opts.select("auto_offset_reset").asOpt[String].orElse(config.settings.select("auto_offset_reset").asOpt[String]) // earliest, latest, none
+    val topics = (opts.select("topics").asOpt[String].toSeq ++ opts.select("topic").asOpt[String].orElse(settings.defaultTopic).toSeq)
+      .flatMap(_.split(",").map(_.trim))
+      .filter(_.nonEmpty)
+    if (topics.isEmpty) throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic")
+    val offsetFromOpt = opts.select("offset_from").asOpt[String].map(_.toLong)
+    val offsetToOpt = opts.select("offset_to").asOpt[String].map(_.toLong)
+    val groupIdOpt = opts.select("group_id").asOpt[String].getOrElse(UUID.randomUUID().toString).some
+    val partitionOpt = opts.select("partition").asOpt[String].map(_.toInt)
+    val clientIdOpt = opts.select("client_id").asOpt[String]
+    val groupInstanceIdOpt = opts.select("group_instance_id").asOpt[String]
+    val autoOffsetResetOpt = opts.select("auto_offset_reset").asOpt[String] // earliest, latest, none
 
     val localSettings = consumerSettings
       .applyOnWithOpt(groupIdOpt)((s, groupId) => s.withGroupId(groupId))

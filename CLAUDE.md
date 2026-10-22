@@ -32,8 +32,16 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 
 - **extension.scala** - `EventBrokersExtension` (`AdminExtension`): entity registration, state synced
   from the datastore in `syncStates`, backoffice assets (the UI page is inlined into `extension.js`)
-- **entities/connections.scala** - `EventBrokerConnection` (kind + free-form `settings` JSON), its admin
-  API resource and its datastore
+- **entities/connections.scala** - `EventBrokerConnection` (kind + raw `settings` JSON, read lazily as
+  `typedSettings`), its admin API resource (the `writeValidator` refuses settings that do not fit the
+  kind) and its datastore. The entity format stays lenient on purpose: a stored connection with wrong
+  settings must stay listed to be fixed
+- **entities/settings.scala** - one settings case class per kind (`KafkaSettings`, `RabbitMQSettings`,
+  `PulsarSettings`, `RedisSettings`, `MqttSettings`), read with `Fields`: snake_case, every error
+  collected with its path, unknown fields refused, format checks skipped for `${vault://...}` values.
+  `BrokerSettings.template(kind)` is what `_template?kind=` and the backoffice form start from. A new
+  setting goes in the case class, its `read`, its `json`, the form (`EventBrokerConnectionsPage.js`)
+  and `SettingsSuite`
 - **manager.scala** - `ConnectionManager`, owned by the extension and fed by `syncStates`: one
   `ConnectionSlot` per connection, holding the `ConnectionHandle` serving requests and, while new
   settings connect, the next one (make before break). A handle connects in the background with backoff,
@@ -59,6 +67,7 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
 ## Testing
 
 - `src/test/scala/.../eventbrokers/*Suite.scala` - unit suites, no infrastructure.
+- `it/ConnectionsApiSuite` covers what the admin api accepts (no docker).
 - `it/ConnectionManagerSuite` drives a `ConnectionManager` of its own over `FakeClient`s (no docker):
   the place for lifecycle rules. `it/ConnectionsSuite` checks the same against a real Redis (paused
   with `docker pause`, connections counted with `INFO clients`).

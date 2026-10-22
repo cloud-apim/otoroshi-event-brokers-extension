@@ -144,12 +144,120 @@ otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.conn
 |-------------------------|---------------------------------------------------------------|------------------------------------------------------------------------------|
 | Event broker connection | `event-brokers.extensions.cloud-apim.com/EventBrokerConnection` | `/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections` |
 
+A connection is a `kind` and its `settings`:
+
+```json
+{ "id": "connection_...", "name": "orders", "kind": "kafka", "settings": { "bootstrap_servers": ["kafka:9092"] } }
+```
+
+The admin API refuses settings that do not fit their kind, with every field at fault
+(`settings.bootstrap_servers: required`, `settings.servers: unknown field`, ...). Unknown fields are
+errors: a typo is never silently ignored. `GET .../event-broker-connections/_template?kind=<kind>` gives
+a valid starting point. Any string can be a [vault](https://www.otoroshi.io/docs/topics/secrets)
+reference (`"password": "${vault://local/brokers/kafka_password}"`): the admin API keeps the reference,
+the clients get the secret.
+
+A connection whose stored settings are wrong (written by hand, or in the format of an older version)
+stays listed so that it can be fixed; it is `unavailable` with the errors, and is not tried again
+until its settings change.
+
+<details>
+<summary>The settings of each kind, with their defaults</summary>
+
+**kafka** (`bootstrap_servers` is required)
+
+```json
+{
+  "bootstrap_servers": ["kafka-1:9092", "kafka-2:9092"],
+  "default_topic": null,
+  "security_protocol": "PLAINTEXT",
+  "sasl": { "mechanism": "PLAIN", "username": null, "password": null, "jaas_config": null },
+  "tls": {
+    "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true,
+    "keystore_path": null, "truststore_path": null, "store_password": null
+  },
+  "properties": {}
+}
+```
+
+`security_protocol` is `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`; the `SASL_*` ones need a
+username and a password, or a `jaas_config`. TLS uses certificates of the Otoroshi store
+(`client_certs`, `trusted_certs`: certificate ids), or keystore and truststore files. `properties` are
+raw Kafka client properties, applied last.
+
+**rabbitmq** (`addresses` is required)
+
+```json
+{ "addresses": ["rabbit:5672"], "virtual_host": "/", "username": null, "password": null, "default_queue": null }
+```
+
+**pulsar** (`service_url` is required: `pulsar://` or `pulsar+ssl://`)
+
+```json
+{
+  "service_url": "pulsar://pulsar:6650",
+  "tenant": "public",
+  "namespace": "default",
+  "default_topic": null,
+  "auth": { "kind": "none" },
+  "tls": {
+    "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true,
+    "trust_certs_file_path": null
+  }
+}
+```
+
+`auth` is `{"kind": "none"}`, `{"kind": "token", "token": "..."}` or
+`{"kind": "basic", "username": "...", "password": "..."}`. Topics without a scheme are
+`persistent://<tenant>/<namespace>/<topic>`.
+
+**redis** (`uri` is required: `redis://`, `rediss://` for TLS)
+
+```json
+{
+  "uri": "redis://redis:6379",
+  "username": null,
+  "password": null,
+  "default_channel": null,
+  "tls": { "start_tls": false, "verify_peer": true },
+  "io_thread_pool_size": null,
+  "computation_thread_pool_size": null
+}
+```
+
+**mqtt** (`host` is required)
+
+```json
+{
+  "host": "mosquitto",
+  "port": 1883,
+  "client_id_prefix": "otoroshi",
+  "username": null,
+  "password": null,
+  "default_topic": null,
+  "default_qos": 0,
+  "retain": false,
+  "clean_session": true,
+  "connection_timeout_seconds": 10,
+  "keep_alive_seconds": 60
+}
+```
+
+Every client gets its own id, the prefix and a random suffix: two nodes of a cluster never share one
+(a broker drops the older of two clients with the same id).
+
+</details>
+
+A call that names no topic (queue, channel) uses the default one of its connection, and is refused with
+a `400` when there is none.
+
 ## Running the tests
 
 | Suites                                   | What they run against                                        | Needs   |
 |------------------------------------------|--------------------------------------------------------------|---------|
-| `EventWrapperSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite` | the code alone                 | nothing |
+| `EventWrapperSuite`, `PluginConfigSuite`, `ConnectionManagerSettingsSuite`, `SettingsSuite` | the code alone | nothing |
 | `it.ConnectionManagerSuite`              | the connection lifecycle over fake brokers, on the env of an Otoroshi in the test jvm | nothing |
+| `it.ConnectionsApiSuite`                 | what the admin api accepts as connections, on an Otoroshi in the test jvm | nothing |
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.MqttSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
 

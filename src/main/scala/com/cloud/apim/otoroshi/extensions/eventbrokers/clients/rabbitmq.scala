@@ -2,7 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, RabbitMQSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import com.rabbitmq.client._
 import otoroshi.env.Env
@@ -16,19 +16,19 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
 import scala.util.Try
 
-class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
+class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQSettings) extends EventBrokerClient {
 
   val factory = new ConnectionFactory()
-  factory.setVirtualHost(config.settings.select("virtual_host").asOpt[String].getOrElse("/"))
+  factory.setVirtualHost(settings.virtualHost)
   factory.setTopologyRecoveryEnabled(false)
   factory.setAutomaticRecoveryEnabled(true)
   factory.setNetworkRecoveryInterval(1000)
-  config.settings.select("username").asOpt[String].filterNot(_.isBlank).foreach(v => factory.setUsername(v))
-  config.settings.select("password").asOpt[String].filterNot(_.isBlank).foreach(v => factory.setPassword(v))
+  settings.username.foreach(v => factory.setUsername(v))
+  settings.password.foreach(v => factory.setPassword(v))
   // TODO: handle declarations
   // TODO: handle recovery
   factory.setConnectionTimeout(10000)
-  val servers = config.settings.select("servers").asOpt[Seq[String]].getOrElse(Seq.empty)
+  private val servers = settings.addresses
 
   private val connectionRef = new AtomicReference[Option[Connection]](None)
   private val channelRef    = new AtomicReference[Option[Channel]](None)
@@ -77,11 +77,10 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBroke
   override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
     val queueName = event.vendorMetadata.get("queue")
       .orElse(opts.select("queue").asOpt[String])
-      .orElse(config.settings.select("queue").asOpt[String])
-      .getOrElse("testing")
+      .orElse(settings.defaultQueue)
+      .getOrElse(throw new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue"))
     val routingKey = event.vendorMetadata.get("routing_key")
       .orElse(opts.select("routing_key").asOpt[String])
-      .orElse(config.settings.select("routing_key").asOpt[String])
     val props = buildProps(event)
     if (env.isDev) {
       channel.queueDeclare(queueName, false, false, false, null)
@@ -147,10 +146,9 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection) extends EventBroke
     }
     // TODO: handle cancel, shutdown, end of stream, etc
     val queueName = opts.select("queue").asOpt[String]
-      .orElse(config.settings.select("queue").asOpt[String])
-      .getOrElse("testing")
+      .orElse(settings.defaultQueue)
+      .getOrElse(throw new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue"))
     val routingKey = opts.select("routing_key").asOpt[String]
-      .orElse(config.settings.select("routing_key").asOpt[String])
     if (env.isDev) {
       channel.queueDeclare(queueName, false, false, false, null)
     }

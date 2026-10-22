@@ -13,11 +13,11 @@ class RabbitMQSuite extends BrokerSuite {
   lazy val connection: String = Gateway.createConnection(
     "rabbitmq",
     Json.obj(
-      "servers"      -> Json.arr(s"${Brokers.rabbitmq.getHost}:${Brokers.rabbitmq.getAmqpPort}"),
-      "virtual_host" -> "/",
-      "username"     -> Brokers.rabbitmq.getAdminUsername,
-      "password"     -> Brokers.rabbitmq.getAdminPassword,
-      "queue"        -> "default-queue"
+      "addresses"     -> Json.arr(s"${Brokers.rabbitmq.getHost}:${Brokers.rabbitmq.getAmqpPort}"),
+      "virtual_host"  -> "/",
+      "username"      -> Brokers.rabbitmq.getAdminUsername,
+      "password"      -> Brokers.rabbitmq.getAdminPassword,
+      "default_queue" -> "default-queue"
     )
   )
   lazy val ingester = Gateway.brokerRoute[HttpEventsIngester](connection)

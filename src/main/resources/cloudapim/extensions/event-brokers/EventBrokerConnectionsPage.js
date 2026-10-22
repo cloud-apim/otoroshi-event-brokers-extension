@@ -6,6 +6,11 @@ function input(type, label, props) {
   };
 }
 
+const certificates = {
+  valuesFrom: '/bo/api/proxy/api/certificates',
+  transformer: (a) => ({ value: a.id, label: a.name }),
+};
+
 const connectionStatusColors = {
   connected: 'bg-success',
   connecting: 'bg-info',
@@ -59,74 +64,72 @@ class EventBrokerConnectionsPage extends Component {
           { 'label': 'Kafka', value: 'kafka' },
           { 'label': 'Pulsar', value: 'pulsar' },
           { 'label': 'MQTT', value: 'mqtt' },
-          { 'label': 'Redis Pub/Sub', value: 'redis' },
+          { 'label': 'Redis', value: 'redis' },
         ] }
     },
     'settings': {
       type: 'jsonobjectcode',
       props: { label: 'Settings' },
     },
-    'settings.servers': input('array', 'Server URIs'),
-    'settings.keyPass': input('password', 'Keystore/Truststore password'),
-    'settings.keystore': input('string', 'Keystore path'),
-    'settings.truststore': input('string', 'Truststore path'),
-    'settings.topic': input('string', 'Topic'),
-    'settings.hostValidation': input('bool', 'Hostname validation'),
-    'settings.mtlsConfig.mtls': input('bool', 'Custom TLS enabled'),
-    'settings.mtlsConfig.loose': input('bool', 'TLS loose'),
-    'settings.mtlsConfig.trustAll': input('bool', 'Trust all'),
-    'settings.mtlsConfig.certs': input('select', 'Client cert', {
-      placeholder: 'Choose a client certificate',
-      valuesFrom: '/bo/api/proxy/api/certificates',
-      transformer: (a) => ({
-        value: a.id,
-        label: a.name,
-      }),
-    }),
-    'settings.mtlsConfig.trustedCerts': input('select', 'Trusted certs', {
-      placeholder: 'Choose a trusted certificate',
-      valuesFrom: '/bo/api/proxy/api/certificates',
-      transformer: (a) => ({
-        value: a.id,
-        label: a.name,
-      }),
-     }),
-    'settings.securityProtocol': input('select', 'Security Protocol', { 
-      placeholder: 'Choose a security protocol',
-      possibleValues: [
-        { value: 'PLAINTEXT', label: "PLAINTEXT" },
-        { value: 'SSL', label: "SSL" },
-        { value: 'SASL_PLAINTEXT', label: "SASL_PLAINTEXT" },
-        { value: 'SASL_SSL', label: "SASL_SSL" },
-      ]
-    }),
-    'settings.saslConfig.username': input('string', 'Username'),
-    'settings.saslConfig.password': input('string', 'Password'),
-    'settings.saslConfig.mechanism': input('string', 'Auth. Mechanism'),
-    'settings.publisher_id': input('string', 'Publisher id'),
+    // shared
+    'settings.default_topic': input('string', 'Default topic', { help: 'Used when a call names no topic' }),
+    'settings.username': input('string', 'Username'),
+    'settings.password': input('password', 'Password'),
     'settings.host': input('string', 'Host'),
     'settings.port': input('number', 'Port'),
-    'settings.username': input('string', 'Username'),
-    'settings.password': input('string', 'Password'),
-    'settings.retained': input('bool', 'Retained'),
-    'settings.qos': input('number', 'Message QoS'),
-    'settings.uri': input('string', 'Server URI'),
+    'settings.tls.enabled': input('bool', 'TLS'),
+    'settings.tls.client_certs': input('array', 'Client certificates', certificates),
+    'settings.tls.trusted_certs': input('array', 'Trusted certificates', certificates),
+    'settings.tls.trust_all': input('bool', 'Trust every certificate'),
+    'settings.tls.hostname_verification': input('bool', 'Hostname verification'),
+    // kafka
+    'settings.bootstrap_servers': input('array', 'Bootstrap servers', { placeholder: 'host:9092' }),
+    'settings.security_protocol': input('select', 'Security protocol', {
+      possibleValues: ['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL'].map((v) => ({ value: v, label: v })),
+    }),
+    'settings.sasl.mechanism': input('select', 'SASL mechanism', {
+      possibleValues: ['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512', 'OAUTHBEARER', 'GSSAPI'].map((v) => ({ value: v, label: v })),
+    }),
+    'settings.sasl.username': input('string', 'SASL username'),
+    'settings.sasl.password': input('password', 'SASL password'),
+    'settings.sasl.jaas_config': input('string', 'JAAS config', { help: 'Instead of a username and a password' }),
+    'settings.tls.keystore_path': input('string', 'Keystore file'),
+    'settings.tls.truststore_path': input('string', 'Truststore file'),
+    'settings.tls.store_password': input('password', 'Keystore and truststore password'),
+    'settings.properties': input('object', 'Client properties', { help: 'Raw Kafka client properties, applied last' }),
+    // rabbitmq
+    'settings.addresses': input('array', 'Addresses', { placeholder: 'host:5672' }),
+    'settings.virtual_host': input('string', 'Virtual host'),
+    'settings.default_queue': input('string', 'Default queue', { help: 'Used when a call names no queue' }),
+    // pulsar
+    'settings.service_url': input('string', 'Service URL', { placeholder: 'pulsar://host:6650' }),
     'settings.tenant': input('string', 'Tenant'),
     'settings.namespace': input('string', 'Namespace'),
-    'settings.auth.kind': input('select', 'Authentication kind', { 
+    'settings.auth.kind': input('select', 'Authentication', {
       possibleValues: [
-        { value: 'basic', label: "basic" },
-        { value: 'token', label: "token" },
-        { value: 'disabled', label: "disabled" },
-      ]
-     }),
+        { value: 'none', label: 'None' },
+        { value: 'token', label: 'Token' },
+        { value: 'basic', label: 'Basic' },
+      ],
+    }),
+    'settings.auth.token': input('password', 'Token'),
     'settings.auth.username': input('string', 'Username'),
-    'settings.auth.password': input('string', 'Password'),
-    'settings.uris': input('string', 'Server URIs'),
-    'settings.channel': input('string', 'Channel'),
-    'settings.virtual_host': input('string', 'Virtual host'),
-    'settings.queue': input('string', 'Queue name'),
-    'settings.routing_key': input('string', 'Routing key'),
+    'settings.auth.password': input('password', 'Password'),
+    'settings.tls.trust_certs_file_path': input('string', 'Trusted certificates file (pem)'),
+    // redis
+    'settings.uri': input('string', 'URI', { placeholder: 'redis://host:6379, rediss:// for TLS' }),
+    'settings.default_channel': input('string', 'Default channel', { help: 'Used when a call names no channel' }),
+    'settings.tls.start_tls': input('bool', 'STARTTLS'),
+    'settings.tls.verify_peer': input('bool', 'Verify the server certificate'),
+    // mqtt
+    'settings.client_id_prefix': input('string', 'Client id prefix', { help: 'Every client adds a random suffix' }),
+    'settings.default_qos': input('select', 'Default QoS', {
+      possibleValues: [0, 1, 2].map((v) => ({ value: v, label: String(v) })),
+    }),
+    'settings.retain': input('bool', 'Retain published messages'),
+    'settings.clean_session': input('bool', 'Clean session'),
+    'settings.connection_timeout_seconds': input('number', 'Connection timeout (seconds)'),
+    'settings.keep_alive_seconds': input('number', 'Keep alive (seconds)'),
   };
 
   columns = [
@@ -163,126 +166,87 @@ class EventBrokerConnectionsPage extends Component {
   };
 
   formFlow = (state) => {
-    if (!state.kind) {
-      return [
-        '_loc',
-        'id',
-        'name',
-        'description',
-        '>>>Metadata and tags',
-        'tags',
-        'metadata',
-        '<<<Connection',
-        'kind',
-      ]
+    const head = ['_loc', 'id', 'name', 'description', '>>>Metadata and tags', 'tags', 'metadata', '<<<Connection', 'kind'];
+    const tls = ['settings.tls.enabled', 'settings.tls.client_certs', 'settings.tls.trusted_certs', 'settings.tls.trust_all', 'settings.tls.hostname_verification'];
+    switch (state.kind) {
+      case 'kafka':
+        return head.concat([
+          'settings.bootstrap_servers',
+          'settings.default_topic',
+          '>>>Security',
+          'settings.security_protocol',
+          'settings.sasl.mechanism',
+          'settings.sasl.username',
+          'settings.sasl.password',
+          'settings.sasl.jaas_config',
+          '>>>TLS',
+        ], tls, [
+          'settings.tls.keystore_path',
+          'settings.tls.truststore_path',
+          'settings.tls.store_password',
+          '>>>Client properties',
+          'settings.properties',
+        ]);
+      case 'rabbitmq':
+        return head.concat([
+          'settings.addresses',
+          'settings.virtual_host',
+          'settings.default_queue',
+          '>>>Authentication',
+          'settings.username',
+          'settings.password',
+        ]);
+      case 'pulsar':
+        return head.concat([
+          'settings.service_url',
+          'settings.tenant',
+          'settings.namespace',
+          'settings.default_topic',
+          '>>>Authentication',
+          'settings.auth.kind',
+        ], (state.settings && state.settings.auth && state.settings.auth.kind === 'token') ? ['settings.auth.token'] : [],
+        (state.settings && state.settings.auth && state.settings.auth.kind === 'basic') ? ['settings.auth.username', 'settings.auth.password'] : [],
+        ['>>>TLS'], tls, ['settings.tls.trust_certs_file_path']);
+      case 'redis':
+        return head.concat([
+          'settings.uri',
+          'settings.default_channel',
+          '>>>Authentication',
+          'settings.username',
+          'settings.password',
+          '>>>TLS',
+          'settings.tls.start_tls',
+          'settings.tls.verify_peer',
+        ]);
+      case 'mqtt':
+        return head.concat([
+          'settings.host',
+          'settings.port',
+          'settings.default_topic',
+          'settings.default_qos',
+          'settings.retain',
+          '>>>Authentication',
+          'settings.username',
+          'settings.password',
+          '>>>Session',
+          'settings.client_id_prefix',
+          'settings.clean_session',
+          'settings.connection_timeout_seconds',
+          'settings.keep_alive_seconds',
+        ]);
+      default:
+        return head;
     }
-    if (state.kind === "kafka") {
-      return [
-        '_loc',
-        'id',
-        'name',
-        'description',
-        '>>>Metadata and tags',
-        'tags',
-        'metadata',
-        '<<<Connection options',
-        'kind',
-        'settings.servers',
-        'settings.topic',
-        '>>>TLS',
-        'settings.keyPass',
-        'settings.keystore',
-        'settings.truststore',
-        'settings.hostValidation',
-        'settings.mtlsConfig.mtls',
-        'settings.mtlsConfig.loose',
-        'settings.mtlsConfig.trustAll',
-        'settings.mtlsConfig.certs',
-        'settings.mtlsConfig.trustedCerts',
-        '>>> Authentication',
-        'settings.securityProtocol',
-        'settings.saslConfig.username',
-        'settings.saslConfig.password',
-        'settings.saslConfig.mechanism',
-      ];
-    }
-    if (state.kind === "mqtt") {
-      return [
-        '_loc',
-        'id',
-        'name',
-        'description',
-        '>>>Metadata and tags',
-        'tags',
-        'metadata',
-        '<<<Connection options',
-        'kind',
-        'settings.publisher_id',
-        'settings.host',
-        'settings.port',
-        'settings.topic',
-        'settings.retained',
-        'settings.qos',
-        '>>>Authentication',
-        'settings.username',
-        'settings.password',
-      ];
-    }
-    if (state.kind === "pulsar") {
-      return [
-        '_loc',
-        'id',
-        'name',
-        'description',
-        '>>>Metadata and tags',
-        'tags',
-        'metadata',
-        '<<<Connection options',
-        'kind',
-        'settings.uri',
-        'settings.tenant',
-        'settings.namespace',
-        'settings.topic',
-        '>>>Authentication',
-        'settings.auth.kind',
-        'settings.auth.username',
-        'settings.auth.password',
-      ];
-    }
-    if (state.kind === "redis") {
-      return [
-        '_loc',
-        'id',
-        'name',
-        'description',
-        '>>>Metadata and tags',
-        'tags',
-        'metadata',
-        '<<<Connection options',
-        'kind',
-        'settings.uris',
-        'settings.channel',
-      ];
-    }
-    return [
-      '_loc',
-      'id',
-      'name',
-      'description',
-      '>>>Metadata and tags',
-      'tags',
-      'metadata',
-      '<<<Connection options',
-      'kind',
-      'settings.servers',
-      'settings.virtual_host',
-      'settings.queue',
-      'settings.routing_key',
-      '>>>Authentication',
-      'settings.username',
-      'settings.password',
-    ];
   }
+
+  // the server knows the defaults of every kind: the form starts from its template
+  fetchTemplate = (kind) => {
+    return fetch(`/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections/_template?kind=${kind}`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    }).then((r) => r.json());
+  };
 
   componentDidMount() {
     this.props.setTitle(`Event Broker Connections`);
@@ -296,17 +260,7 @@ class EventBrokerConnectionsPage extends Component {
         parentProps: this.props,
         selfUrl: "extensions/cloud-apim/event-brokers/connections",
         defaultTitle: "All event broker connections",
-        defaultValue: () => {
-          return {
-            id: 'connection_' + uuid(),
-            name: 'RabbitMQ connection',
-            description: 'An RabbitMQ connection',
-            tags: [],
-            metadata: {},
-            kind: 'rabbitmq',
-            settings: {},
-          }
-        },
+        defaultValue: () => this.fetchTemplate('kafka'),
         itemName: "Event Broker Connection",
         formSchema: this.formSchema,
         formFlow: this.formFlow,
@@ -328,96 +282,10 @@ class EventBrokerConnectionsPage extends Component {
         export: true,
         kubernetesKind: "event-brokers.extensions.cloud-apim.com/EventBrokerConnection",
         onStateChange: (state, oldState, update) => {
-          if (!_.isEqual(state.kind, oldState.kind)) {
-            if (state.kind === 'kafka') {
-              update({
-                id: state.id,
-                name: state.name,
-                description: state.description,
-                tags: state.tags,
-                metadata: state.metadata,
-                kind: 'kafka',
-                settings: {
-                  'servers': ["127.0.0.1:9093"],
-                  'topic': 'topic',
-                  'securityProtocol': 'PLAINTEXT',
-                  saslConfig: {
-                    username: '',
-                    password: '',
-                    mechanism: 'PLAIN'
-                  }
-                },
-              });
-            } else if (state.kind === 'mqtt') {
-              update({
-                id: state.id,
-                name: state.name,
-                description: state.description,
-                tags: state.tags,
-                metadata: state.metadata,
-                kind: 'mqtt',
-                settings: {
-                  'publisher_id': uuid(),
-                  'host': 'localhost',
-                  'port': 1883,
-                  'topic': 'topic',
-                  'username': '',
-                  'password': '',
-                  'qos': 0,
-                  'retained': true,
-                },
-              });
-            } else if (state.kind === 'pulsar') {
-              update({
-                id: state.id,
-                name: state.name,
-                description: state.description,
-                tags: state.tags,
-                metadata: state.metadata,
-                kind: 'pulsar',
-                settings: {
-                  'uri': 'pulsar://localhost:6650',
-                  'tenant': 'tenant',
-                  'namespace': 'namespace',
-                  'topic': 'topic',
-                  'auth': {
-                    kind: 'basic',
-                    'username': '',
-                    'password': '',
-                  }
-                },
-              });
-            } else if (state.kind === 'redis') {
-              update({
-                id: state.id,
-                name: state.name,
-                description: state.description,
-                tags: state.tags,
-                metadata: state.metadata,
-                kind: 'redis',
-                settings: {
-                  'uris': ['redis://username@password:localhost:6379'],
-                  'channel': '/',
-                },
-              });
-            } else {
-              update({
-                id: state.id,
-                name: state.name,
-                description: state.description,
-                tags: state.tags,
-                metadata: state.metadata,
-                kind: 'rabbitmq',
-                settings: {
-                  'servers': ['localhost:5672'],
-                  'virtual_host': '/',
-                  'queue': 'queue',
-                  'routing_key': '',
-                  'username': '',
-                  'password': '',
-                },
-              });
-            }
+          if (oldState.kind && !_.isEqual(state.kind, oldState.kind)) {
+            this.fetchTemplate(state.kind).then((template) => {
+              update({ ...state, settings: template.settings });
+            });
           }
         }
       }, null)
