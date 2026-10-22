@@ -1,0 +1,53 @@
+name: ci
+
+# Unit suites, then the integration suites: an Otoroshi in the test jvm, and every broker (kafka,
+# rabbitmq, pulsar, redis, mqtt) in a container started by testcontainers on the runner's docker.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['documentation/**', '**.md']
+  pull_request:
+    paths-ignore: ['documentation/**', '**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: sbt/setup-sbt@v1
+
+      - uses: coursier/cache-action@v6
+
+      # pulling them inside the suites would count against their timeouts
+      - name: pull the broker images
+        run: |
+          for image in apache/kafka:3.8.0 rabbitmq:4.1-management-alpine apachepulsar/pulsar:4.0.5 redis:7.4-alpine eclipse-mosquitto:2.0.21; do
+            docker pull -q "$image" &
+          done
+          wait
+
+      - name: test
+        run: sbt -batch test
+
+      - name: test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: target/test-reports
+          if-no-files-found: ignore
