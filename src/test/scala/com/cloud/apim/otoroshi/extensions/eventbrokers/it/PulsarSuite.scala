@@ -50,7 +50,7 @@ class PulsarSuite extends BrokerSuite {
     keepPublishing(received, atMost = 60.seconds)(n => publish(topic, n, run))
     val events   = await(received)
     assertConsecutive(numbers(events), 3)
-    assert((events.head \ "vendor_metadata" \ "topic").as[String].endsWith(topic), events.head.toString)
+    assert(ext(events.head, "pulsartopic").exists(_.endsWith(topic)), events.head.toString)
   }
 
   test("sse consumer: one event per message") {

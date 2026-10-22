@@ -35,16 +35,19 @@ abstract class BrokerSuite extends munit.FunSuite {
   def opts(values: (String, Any)*): String =
     values.map((k, v) => s"x-ca-event-broker-opts-$k=${java.net.URLEncoder.encode(v.toString, "UTF-8")}").mkString("?", "&", "")
 
-  /** what was published, whatever the content type the event came back with */
-  def payload(event: JsValue): JsValue = {
-    val value = event \ "value"
-    val data  = value \ "data"
-    (value \ "type").asOpt[String].map(_.toLowerCase) match {
-      case Some("json" | "application/json") => data.as[JsValue]
-      case Some("text" | "text/plain")       => Json.parse(data.as[String])
-      case _                                 => Json.parse(new String(Base64.getDecoder.decode(data.as[String]), "UTF-8"))
+  /** the data of a structured cloudevent, as json */
+  def payload(event: JsValue): JsValue =
+    (event \ "data_base64").asOpt[String] match {
+      case Some(base64) => Json.parse(new String(Base64.getDecoder.decode(base64), "UTF-8"))
+      case None         =>
+        (event \ "data").as[JsValue] match {
+          case JsString(text) => Json.parse(text)
+          case json           => json
+        }
     }
-  }
+
+  /** an extension of a cloudevent: what the broker said of the message (`kafkaoffset`, `redischannel`, ...) */
+  def ext(event: JsValue, name: String): Option[String] = (event \ name).asOpt[String]
 
   def message(n: Int, run: String): JsObject = Json.obj("n" -> n, "run" -> run)
 

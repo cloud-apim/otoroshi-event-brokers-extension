@@ -80,11 +80,11 @@ class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettin
 
   private def noChannel = new IllegalArgumentException("no channel: none in the call, and the connection has no default_channel")
 
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = {
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = {
     val commands = connection.async()
     Future.sequence(events.map { event =>
       try {
-        val channel = event.vendorMetadata
+        val channel = event.metadata
           .get("channel")
           .orElse(opts.select("channel").asOpt[String])
           .orElse(opts.select("topic").asOpt[String])
@@ -106,13 +106,9 @@ class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettin
 
   private def toEvent(channel: String, pattern: Option[String], message: ByteString): ReceivedEvent =
     ReceivedEvent.unacked(
-      EventWrapper(
-        key = None,
+      BrokerMessage(
         data = message,
-        keyContentType = "text",
-        dataContentType = "binary",
-        headers = Map.empty,
-        vendorMetadata = Map("provider" -> "redis", "channel" -> channel) ++ pattern.map(p => Map("pattern" -> p)).getOrElse(Map.empty)
+        metadata = Map("provider" -> "redis", "channel" -> channel) ++ pattern.map(p => Map("pattern" -> p)).getOrElse(Map.empty)
       )
     )
 

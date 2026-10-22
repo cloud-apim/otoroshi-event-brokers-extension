@@ -110,45 +110,43 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
     }
   }
 
-  private def buildProps(wrapper: EventWrapper, publishId: String): AMQP.BasicProperties = {
-    val headers: java.util.Map[String, AnyRef] = (wrapper.headers ++ Map(
-      "content-type"     -> wrapper.dataContentType,
-      "key-content-type" -> wrapper.keyContentType,
-      publishIdHeader    -> publishId
-    )).view.mapValues(_.asInstanceOf[AnyRef]).toMap.asJava
+  /** the amqp properties: the same snake_case names as what is read back (`content_type`, `message_id`, ...) */
+  private def buildProps(message: BrokerMessage, publishId: String): AMQP.BasicProperties = {
+    val headers: java.util.Map[String, AnyRef] = (message.headers ++ Map(publishIdHeader -> publishId)).view.mapValues(_.asInstanceOf[AnyRef]).toMap.asJava
+    val m                                      = message.metadata
     new AMQP.BasicProperties.Builder()
       .headers(headers)
-      .applyOnWithOpt(wrapper.vendorMetadata.get("contentType")) { case (builder, value) => builder.contentType(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("contentEncoding")) { case (builder, value) => builder.contentEncoding(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("deliveryMode")) { case (builder, value) => builder.deliveryMode(value.toInt) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("priority")) { case (builder, value) => builder.priority(value.toInt) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("correlationId")) { case (builder, value) => builder.correlationId(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("replyTo")) { case (builder, value) => builder.replyTo(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("expiration")) { case (builder, value) => builder.expiration(value) }
-      .applyOnWithOpt(wrapper.key.map(_.utf8String).orElse(wrapper.vendorMetadata.get("messageId"))) { case (builder, value) => builder.messageId(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("timestamp")) { case (builder, value) => builder.timestamp(new Date(value.toLong)) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("type")) { case (builder, value) => builder.`type`(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("userId")) { case (builder, value) => builder.userId(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("appId")) { case (builder, value) => builder.appId(value) }
-      .applyOnWithOpt(wrapper.vendorMetadata.get("clusterId")) { case (builder, value) => builder.clusterId(value) }
+      .applyOnWithOpt(m.get("content_type")) { case (builder, value) => builder.contentType(value) }
+      .applyOnWithOpt(m.get("content_encoding")) { case (builder, value) => builder.contentEncoding(value) }
+      .applyOnWithOpt(m.get("delivery_mode")) { case (builder, value) => builder.deliveryMode(value.toInt) }
+      .applyOnWithOpt(m.get("priority")) { case (builder, value) => builder.priority(value.toInt) }
+      .applyOnWithOpt(m.get("correlation_id")) { case (builder, value) => builder.correlationId(value) }
+      .applyOnWithOpt(m.get("reply_to")) { case (builder, value) => builder.replyTo(value) }
+      .applyOnWithOpt(m.get("expiration")) { case (builder, value) => builder.expiration(value) }
+      .applyOnWithOpt(m.get("message_id").orElse(message.key.map(_.utf8String))) { case (builder, value) => builder.messageId(value) }
+      .applyOnWithOpt(m.get("timestamp")) { case (builder, value) => builder.timestamp(new Date(value.toLong)) }
+      .applyOnWithOpt(m.get("type")) { case (builder, value) => builder.`type`(value) }
+      .applyOnWithOpt(m.get("user_id")) { case (builder, value) => builder.userId(value) }
+      .applyOnWithOpt(m.get("app_id")) { case (builder, value) => builder.appId(value) }
+      .applyOnWithOpt(m.get("cluster_id")) { case (builder, value) => builder.clusterId(value) }
       .build()
   }
 
   private def noQueue = new IllegalArgumentException("no queue: none in the call, and the connection has no default_queue")
 
   /** an exchange and its routing key, or a queue through the default exchange */
-  private def target(event: EventWrapper, opts: JsObject): (String, String) = {
-    val exchange   = event.vendorMetadata.get("exchange").orElse(opts.select("exchange").asOpt[String]).getOrElse("")
-    val routingKey = event.vendorMetadata.get("routing_key").orElse(opts.select("routing_key").asOpt[String])
+  private def target(event: BrokerMessage, opts: JsObject): (String, String) = {
+    val exchange   = event.metadata.get("exchange").orElse(opts.select("exchange").asOpt[String]).getOrElse("")
+    val routingKey = event.metadata.get("routing_key").orElse(opts.select("routing_key").asOpt[String])
     if (exchange.isEmpty) {
-      val queue = event.vendorMetadata.get("queue").orElse(opts.select("queue").asOpt[String]).orElse(routingKey).orElse(settings.defaultQueue).getOrElse(throw noQueue)
+      val queue = event.metadata.get("queue").orElse(opts.select("queue").asOpt[String]).orElse(routingKey).orElse(settings.defaultQueue).getOrElse(throw noQueue)
       ("", queue)
     } else {
       (exchange, routingKey.getOrElse(""))
     }
   }
 
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] =
     Future {
       // one publisher channel: publishes are serialized on it, which keeps their order
       synchronized {
@@ -175,19 +173,16 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       })
     }
 
-  private def toEvent(message: Delivery): EventWrapper = {
+  private def toEvent(message: Delivery): BrokerMessage = {
     val props                        = Option(message.getProperties)
     val envelope                     = message.getEnvelope
     val headers: Map[String, AnyRef] = props.flatMap(p => Option(p.getHeaders)).map(_.asScala.toMap).getOrElse(Map.empty[String, AnyRef]) - publishIdHeader
-    val contentType                  = headers.get("content-type").map(_.toString).orElse(props.flatMap(p => Option(p.getContentType))).getOrElse("binary")
     def opt(name: String, value: => Any): Option[(String, String)] = Option(value).map(v => (name, v.toString))
-    EventWrapper(
-      key = props.flatMap(p => Option(p.getMessageId)).map(_.byteString),
+    BrokerMessage(
+      key = None,
       data = ByteString(message.getBody),
-      keyContentType = "text",
-      dataContentType = contentType,
       headers = headers.collect { case (key, value) if value != null => (key, value.toString) },
-      vendorMetadata = Map(
+      metadata = Map(
         "provider"     -> "rabbitmq",
         "exchange"     -> envelope.getExchange,
         "routing_key"  -> envelope.getRoutingKey,

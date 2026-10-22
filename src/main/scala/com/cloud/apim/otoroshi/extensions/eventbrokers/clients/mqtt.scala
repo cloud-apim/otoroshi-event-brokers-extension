@@ -77,12 +77,12 @@ class MQTTBrokerClient(val config: EventBrokerConnection, settings: MqttSettings
   }
 
   // paho's publish waits for the broker with qos 1 and 2: on the io pool
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = Future {
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = Future {
     events.map { event =>
       try {
-        val topic    = topicOf(event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]))
-        val qos      = event.vendorMetadata.get("qos").orElse(opts.select("qos").asOpt[String]).map(_.toInt).getOrElse(settings.defaultQos)
-        val retained = event.vendorMetadata.get("retained").orElse(opts.select("retained").asOpt[String]).map(_.toBoolean).getOrElse(settings.retain)
+        val topic    = topicOf(event.metadata.get("topic").orElse(opts.select("topic").asOpt[String]))
+        val qos      = event.metadata.get("qos").orElse(opts.select("qos").asOpt[String]).map(_.toInt).getOrElse(settings.defaultQos)
+        val retained = event.metadata.get("retained").orElse(opts.select("retained").asOpt[String]).map(_.toBoolean).getOrElse(settings.retain)
         val message  = new MqttMessage(event.data.toArray)
         message.setQos(qos)
         message.setRetained(retained)
@@ -95,13 +95,9 @@ class MQTTBrokerClient(val config: EventBrokerConnection, settings: MqttSettings
   }(using io)
 
   private def toEvent(topic: String, message: MqttMessage): ReceivedEvent = ReceivedEvent.unacked(
-    EventWrapper(
-      key = None,
+    BrokerMessage(
       data = ByteString(message.getPayload),
-      keyContentType = "text",
-      dataContentType = "binary",
-      headers = Map.empty,
-      vendorMetadata = Map(
+      metadata = Map(
         "provider"     -> "mqtt",
         "topic"        -> topic,
         "message_id"   -> message.getId.toString,

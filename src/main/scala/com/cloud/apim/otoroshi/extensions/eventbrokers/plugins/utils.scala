@@ -131,9 +131,15 @@ object PluginUtils {
     } yield SubscriptionSpec(topics = topics, group = group, from = f, delivery = d, options = opts)
   }
 
-  /** opens the subscription the call asks for, or says why it cannot: 400 for the call, 502 for the broker */
-  def subscribe(client: EventBrokerClient, opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Either[NgProxyEngineError, Source[ReceivedEvent, ?]]] =
-    subscriptionSpec(opts) match {
+  /**
+   * opens the subscription the call asks for, or says why it cannot: 400 for the call, 502 for the
+   * broker. `resume`: where a client coming back stopped, wins over what the options say
+   */
+  def subscribe(client: EventBrokerClient, opts: JsObject, resume: Option[StartFrom] = None)(using
+      env: Env,
+      ec: ExecutionContext
+  ): Future[Either[NgProxyEngineError, Source[ReceivedEvent, ?]]] =
+    subscriptionSpec(opts).map(spec => resume.map(from => spec.copy(from = from)).getOrElse(spec)) match {
       case Left(error) => Future.successful(Left(badRequest(error)))
       case Right(spec) =>
         client.capabilities.refuse(spec, client.config.kind.label) match {
@@ -153,23 +159,42 @@ object PluginUtils {
    * serializes the events, and acks each one as it is handed over to the response: at least once
    * means whatever a client did not get (it went away, the stream was cut) is delivered again
    */
-  def handOver[A](source: Source[ReceivedEvent, ?])(serialize: EventWrapper => A): Source[A, ?] =
-    source
-      .map(received => (received, serialize(received.event)))
-      .map { (received, serialized) =>
-        received.ack().failed.foreach(e => logger.warn(s"could not ack an event: ${ConnectionManager.describe(e)}"))(using ExecutionContext.parasitic)
-        serialized
-      }
+  def handOver[A](source: Source[ReceivedEvent, ?])(serialize: ReceivedEvent => A): Source[A, ?] =
+    acked(source.map(received => (received, serialize(received))))
 
-  /** publishes in batches, one result per event, in order: a broker failing gives failed results, not a broken stream */
-  def publishAll(client: EventBrokerClient, events: Source[EventWrapper, ?], opts: JsObject)(using env: Env, ec: ExecutionContext): Source[PublishResult, ?] =
+  /** the second of each pair goes out, and the event it comes from is acked as it does */
+  def acked[A](source: Source[(ReceivedEvent, A), ?]): Source[A, ?] =
+    source.map { (received, serialized) =>
+      received.ack().failed.foreach(e => logger.warn(s"could not ack an event: ${ConnectionManager.describe(e)}"))(using ExecutionContext.parasitic)
+      serialized
+    }
+
+  /**
+   * publishes in batches, through the cloudevents binding of the broker: one json result per event,
+   * in order, with the id of the event. an invalid event, or a broker failing, gives failed results,
+   * not a broken stream
+   */
+  def publishAll(client: EventBrokerClient, events: Source[Either[String, Outgoing], ?], opts: JsObject)(using
+      env: Env,
+      ec: ExecutionContext
+  ): Source[JsObject, ?] =
     events
       .groupedWithin(100, 10.millis)
       .mapAsync(1) { batch =>
-        Future
-          .fromTry(Try(client.publish(batch, opts)))
-          .flatten
-          .recover { case NonFatal(e) => batch.map(_ => PublishResult.failed(e)) }
+        val valid     = batch.collect { case Right(outgoing) => outgoing }
+        val messages  = valid.map(o => CloudEventBindings.toMessage(o.event, client.config.kind, o.routing))
+        val published =
+          if (messages.isEmpty) Future.successful(Seq.empty[PublishResult])
+          else Future.fromTry(Try(client.publish(messages, opts))).flatten.recover { case NonFatal(e) => messages.map(_ => PublishResult.failed(e)) }
+        published.map { results =>
+          val byEvent = valid.zip(results).iterator
+          batch.map {
+            case Left(error) => Json.obj("published" -> false, "error" -> "invalid_event", "error_description" -> error)
+            case Right(_)    =>
+              val (outgoing, result) = byEvent.next()
+              result.json ++ Json.obj("id" -> outgoing.event.id)
+          }
+        }
       }
       .mapConcat(identity)
 

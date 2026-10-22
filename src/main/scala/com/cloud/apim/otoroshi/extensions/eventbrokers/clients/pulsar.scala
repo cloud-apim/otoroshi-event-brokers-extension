@@ -120,15 +120,8 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
     }
   }
 
-  private def buildProps(wrapper: EventWrapper): Map[String, String] =
-    wrapper.headers ++ Map(
-      "content-type"     -> wrapper.dataContentType,
-      "key-content-type" -> wrapper.keyContentType,
-      "timestamp"        -> System.currentTimeMillis().toString
-    )
-
-  override def publish(events: Seq[EventWrapper], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = {
-    val targets = events.map(event => Try(topicOf(event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]))))
+  override def publish(events: Seq[BrokerMessage], opts: JsObject)(using env: Env, ec: ExecutionContext): Future[Seq[PublishResult]] = {
+    val targets = events.map(event => Try(topicOf(event.metadata.get("topic").orElse(opts.select("topic").asOpt[String]))))
     // the producers first, then every send in order: messages to one topic keep their order
     Future
       .traverse(targets.flatMap(_.toOption).distinct)(topic => producer(topic).map(p => Try(p)).map(p => (topic, p)))
@@ -143,8 +136,8 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
                 try {
                   p.newMessage()
                     .value(event.data.toArray)
-                    .applyOnWithOpt(event.key.map(_.utf8String))((m, key) => m.key(key))
-                    .properties(buildProps(event).asJava)
+                    .applyOnWithOpt(event.key.map(_.utf8String).orElse(event.metadata.get("key")).orElse(opts.select("key").asOpt[String]))((m, key) => m.key(key))
+                    .properties(event.headers.asJava)
                     .sendAsync()
                     .asScala
                     .map { id =>
@@ -161,17 +154,13 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
       }
   }
 
-  private def toEvent(message: Message[Array[Byte]]): EventWrapper = {
-    val props       = Option(message.getProperties).map(_.asScala.toMap).getOrElse(Map.empty[String, String])
-    val contentType = props.getOrElse("content-type", "binary")
+  private def toEvent(message: Message[Array[Byte]]): BrokerMessage = {
     def some(name: String, value: => Any): Option[(String, String)] = Option(value).map(v => (name, v.toString))
-    EventWrapper(
+    BrokerMessage(
       key = Option(message.getKey).map(ByteString(_)),
       data = Option(message.getValue).map(ByteString(_)).getOrElse(ByteString.empty),
-      keyContentType = "text",
-      dataContentType = contentType,
-      headers = props,
-      vendorMetadata = Map("provider" -> "pulsar") ++ Seq(
+      headers = Option(message.getProperties).map(_.asScala.toMap).getOrElse(Map.empty[String, String]),
+      metadata = Map("provider" -> "pulsar") ++ Seq(
         some("topic", message.getTopicName),
         some("message_id", message.getMessageId),
         some("message_id_bytes", Base64.getEncoder.encodeToString(message.getMessageId.toByteArray)),
@@ -215,7 +204,8 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
           .flatMap { consumer =>
             val positioned = spec.from match {
               case StartFrom.Timestamp(time) => consumer.seekAsync(time).asScala
-              case StartFrom.Offset(_)       => Future.failed(new IllegalArgumentException("pulsar subscriptions start from earliest, latest or a timestamp"))
+              case StartFrom.Offset(_) | StartFrom.Positions(_) =>
+                Future.failed(new IllegalArgumentException("pulsar subscriptions start from earliest, latest or a timestamp"))
               case _                         => Future.unit
             }
             positioned

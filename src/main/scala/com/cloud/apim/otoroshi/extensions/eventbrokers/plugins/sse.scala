@@ -1,7 +1,9 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import org.apache.pekko.stream.Materializer
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.CloudEventBindings
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnectionKind
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, Output, OutputFormat, PluginUtils, SseIds, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -10,6 +12,7 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.EventBro
 import play.api.libs.json._
 import play.api.mvc.Results
 
+import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future}
 
 class SseEventConsumer extends NgBackendCall {
@@ -43,14 +46,45 @@ class SseEventConsumer extends NgBackendCall {
         case Left(reason) => Left(PluginUtils.unavailable(reason)).vfuture
         case Right(lease) => {
           val opts = PluginUtils.buildOpts(ctx.request, config.config, config.includeQuery, config.includeHeaders)
-          val enriched = opts.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-          PluginUtils.subscribe(lease.client, opts).map {
+          val kind = lease.client.config.kind
+          // what a client reconnecting got last: kafka resumes right after it
+          val lastEventId = ctx.request.headers.collectFirst { case (name, value) if name.equalsIgnoreCase("last-event-id") => value }
+          OutputFormat.from(opts) match {
             case Left(error) =>
               lease.release()
-              Left(error)
-            case Right(events) =>
-              val source = PluginUtils.handOver(events)(w => w.sseSerialize(enriched)).withStreamOptions(opts)
-              Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(source)).as("text/event-stream")), None))
+              Left(PluginUtils.badRequest(error)).vfuture
+            case Right(format) =>
+              PluginUtils.subscribe(lease.client, opts, SseIds.resume(kind, lastEventId)).map {
+                case Left(error) =>
+                  lease.release()
+                  Left(error)
+                case Right(events) =>
+                  val resumed   = lastEventId.flatMap(SseIds.readKafka).getOrElse(Map.empty)
+                  val framed    = events.statefulMap(() => resumed)(
+                    (positions, received) => {
+                      val event = CloudEventBindings.fromMessage(received.message, kind)
+                      val next  = if (kind == EventBrokerConnectionKind.Kafka) SseIds.kafkaPosition(received.message).map(positions + _).getOrElse(positions) else positions
+                      val id    = if (next.nonEmpty) SseIds.kafka(next) else event.id
+                      (next, (received, Output.sse(event, format, id)))
+                    },
+                    _ => None
+                  )
+                  val sse       = PluginUtils.acked(framed).withStreamOptions(opts)
+                  val heartbeat = opts.select("heartbeat").asOpt[String].flatMap(_.toLongOption).getOrElse(15000L)
+                  val source    = if (heartbeat > 0) sse.keepAlive(heartbeat.millis, () => Output.sseHeartbeat) else sse
+                  Right(
+                    BackendCallResponse(
+                      NgPluginHttpResponse.fromResult(
+                        Results.Ok
+                          .chunked(lease.releasing(source))
+                          .as("text/event-stream")
+                          // no proxy on the way should keep events in a buffer
+                          .withHeaders("Cache-Control" -> "no-cache", "X-Accel-Buffering" -> "no")
+                      ),
+                      None
+                    )
+                  )
+              }
           }
         }
       }

@@ -1,9 +1,10 @@
 package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins
 
 import org.apache.pekko.stream.Materializer
+import org.apache.pekko.util.ByteString
 import org.apache.pekko.stream.scaladsl.{Flow, Keep, Sink, Source}
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{ClientLease, EventWrapper, PublishResult, Unavailability}
-import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, PluginUtils, withStreamOptions}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ClientLease, CloudEvent, CloudEventBindings, PublishResult, Unavailability}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.{EventBrokerPluginConfig, Ingest, Outgoing, Output, OutputFormat, PluginUtils, withStreamOptions}
 import otoroshi.env.Env
 import otoroshi.next.plugins.api._
 import otoroshi.next.proxy.NgProxyEngineError
@@ -64,6 +65,24 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
     ().vfuture
   }
 
+  /**
+   * a frame to publish: a text frame holding a structured cloudevent is that event, anything else is
+   * the data of an event (its content type from the `content-type` option, or guessed from the frame)
+   */
+  private def incoming(message: Message, data: ByteString, contentType: Option[String], defaults: CloudEvent): Outgoing = {
+    val isText = message.isInstanceOf[play.api.http.websocket.TextMessage]
+    contentType.map(CloudEvent.mediaType) match {
+      case Some(Ingest.LegacyContentType) =>
+        Try(Json.parse(data.toArray)).toOption.map(json => CloudEvent.fromLegacy(json, defaults)).map(Outgoing(_, _)).getOrElse(Outgoing(defaults.copy(data = Some(data))))
+      case _                              =>
+        val structured = if (isText && data.headOption.contains('{'.toByte)) Try(Json.parse(data.toArray)).toOption.flatMap(j => CloudEvent.read(j).toOption) else None
+        structured.map(Outgoing(_)).getOrElse {
+          val guessed = if (!isText) "application/octet-stream" else if (Try(Json.parse(data.toArray)).isSuccess) "application/json" else "text/plain"
+          Outgoing(defaults.copy(datacontenttype = Some(contentType.getOrElse(guessed)), data = Some(data)))
+        }
+    }
+  }
+
   override def callBackendOrError(ctx: NgWebsocketPluginContext)(using env: Env, ec: ExecutionContext): Future[Either[NgProxyEngineError, Flow[Message, Message, ?]]] = {
     val config = ctx.cachedConfig(internalName)(IngesterConsumerWebsocketConfig.format).getOrElse(IngesterConsumerWebsocketConfig.default)
     env.adminExtensions.extension[EventBrokersExtension] match {
@@ -94,8 +113,14 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
             val outSource: Future[Either[NgProxyEngineError, Source[Message, ?]]] = leaseOut match {
               case None => Future.successful(Right(Source.empty))
               case Some(lease) =>
-                val enriched = optsOut.select("enriched").asOpt[String].map(_.toBoolean).getOrElse(true)
-                PluginUtils.subscribe(lease.client, optsOut).map(_.map(events => lease.releasing(PluginUtils.handOver(events)(w => w.wsMessage(enriched)).withStreamOptions(optsOut))))
+                OutputFormat.from(optsOut) match {
+                  case Left(error) => Future.successful(Left(PluginUtils.badRequest(error)))
+                  case Right(format) =>
+                    val kind = lease.client.config.kind
+                    PluginUtils.subscribe(lease.client, optsOut).map(_.map { events =>
+                      lease.releasing(PluginUtils.handOver(events)(r => Output.websocket(CloudEventBindings.fromMessage(r.message, kind), format)).withStreamOptions(optsOut))
+                    })
+                }
             }
             outSource.map {
               case Left(error) =>
@@ -105,19 +130,14 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
                 given Materializer = env.otoroshiMaterializer
                 // one message at a time: a client sending faster than the broker takes waits for it
                 val in = Flow[Message]
-                  .mapAsync(1)(message => WebsocketMessage.PlayMessage(message).bytes())
-                  .map { data =>
-                    contentTypeOpt match {
-                      case Some("application/vnd.cloud-apim-event-broker+json") => EventWrapper.fromJson(data.utf8String.parseJson)
-                      case Some("application/json") => EventWrapper(None, data, "text", "json", Map.empty, Map.empty)
-                      case Some("text/plain") => EventWrapper(None, data, "text", "text", Map.empty, Map.empty)
-                      case _ => EventWrapper(None, data, "text", "binary", Map.empty, Map.empty)
-                    }
-                  }
-                  .mapAsync(1) { event =>
+                  .mapAsync(1)(message => WebsocketMessage.PlayMessage(message).bytes().map(data => (message, data)))
+                  .map((message, data) => incoming(message, data, contentTypeOpt, Ingest.defaults(ctx.route, optsIn)))
+                  .mapAsync(1) { outgoing =>
                     leaseIn match {
                       case None => Future.successful(Seq.empty)
-                      case Some(lease) => lease.client.publish(Seq(event), optsIn).recover { case NonFatal(e) => Seq(PublishResult.failed(e)) }
+                      case Some(lease) =>
+                        val message = CloudEventBindings.toMessage(outgoing.event, lease.client.config.kind, outgoing.routing)
+                        lease.client.publish(Seq(message), optsIn).recover { case NonFatal(e) => Seq(PublishResult.failed(e)) }
                     }
                   }
                   .toMat(Sink.ignore)(Keep.right)

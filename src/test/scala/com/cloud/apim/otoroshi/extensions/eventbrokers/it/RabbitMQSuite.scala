@@ -68,7 +68,7 @@ class RabbitMQSuite extends BrokerSuite {
     (0 until 3).foreach(n => publish(q, n, run))
     val received = await(collect(Gateway.ndjson(consumer, "/" + opts("queue" -> q)), take = 3))
     assertEquals(numbers(received), Seq(0, 1, 2))
-    assertEquals(received.map(e => (e \ "vendor_metadata" \ "routing_key").as[String]).distinct, Seq(q))
+    assertEquals(received.flatMap(e => ext(e, "rabbitmqroutingkey")).distinct, Seq(q))
   }
 
   test("sse consumer: one event per message") {
@@ -112,7 +112,7 @@ class RabbitMQSuite extends BrokerSuite {
     eventually("no consumer left on the queue")(channel.consumerCount(q) == 0L)
     val rest  = await(collect(Gateway.ndjson(consumer, "/" + opts("queue" -> q, "delivery" -> "at-least-once", "take" -> 2)), take = 2))
     assertEquals(numbers(rest).sorted, Seq(1, 2))
-    assert(rest.forall(e => (e \ "vendor_metadata" \ "redelivered").as[String] == "true"), rest.toString)
+    assert(rest.forall(e => ext(e, "rabbitmqredelivered").contains("true")), rest.toString)
   }
 
   test("through an exchange: every subscriber gets every message") {
@@ -133,5 +133,16 @@ class RabbitMQSuite extends BrokerSuite {
     val body = await(res.entity.toStrict(10.seconds)).data.utf8String
     assertEquals(res.status.intValue(), 400, body)
     assert(body.contains("no consumer groups"), body)
+  }
+
+  test("the cloudevent attributes go in cloudEvents: application properties, the content type in the amqp one") {
+    val q   = queue()
+    val res = publish(q, 0, uniq("run"))
+    assertEquals((res \ "published").asOpt[Boolean], Some(true), res.toString)
+    eventually("the message in the queue")(channel.messageCount(q) == 1L)
+    val got = channel.basicGet(q, true)
+    assertEquals(got.getProps.getContentType, "application/json")
+    assertEquals(Option(got.getProps.getHeaders.get("cloudEvents:id")).map(_.toString), (res \ "id").asOpt[String])
+    assertEquals(Option(got.getProps.getHeaders.get("cloudEvents:specversion")).map(_.toString), Some("1.0"))
   }
 }
