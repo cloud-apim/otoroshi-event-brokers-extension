@@ -1,6 +1,6 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers
 
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, InvalidConnectionSettings}
 import org.apache.pekko.actor.{Cancellable, Scheduler}
 import org.apache.pekko.stream.scaladsl.Source
 import otoroshi.env.Env
@@ -188,7 +188,14 @@ final class ConnectionHandle private[eventbrokers] (
     }
   }
 
-  private def failed(n: Int, e: Throwable): Unit = if (!retired.get()) {
+  private def failed(n: Int, e: Throwable): Unit = if (!retired.get()) e match {
+    // trying again changes nothing: only new settings will
+    case invalid: InvalidConnectionSettings =>
+      update(_.copy(state = ConnectionState.Unavailable, error = Some(invalid.getMessage), failures = n, nextAttemptAt = None))
+    case _                                  => retryLater(n, e)
+  }
+
+  private def retryLater(n: Int, e: Throwable): Unit = {
     val delay = manager.settings.backoff(n)
     update(
       _.copy(

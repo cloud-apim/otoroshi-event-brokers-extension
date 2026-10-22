@@ -2,7 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, PulsarAuth, PulsarSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.{EventBrokerClient, EventWrapper}
 import com.sksamuel.pulsar4s.{ConsumerConfig, DefaultProducerMessage, DefaultPulsarClient, MessageId, ProducerConfig, PulsarClient, Subscription, Topic, Consumer as PulsarConsumer, Producer as PulsarProducer}
 import org.apache.pulsar.client.api.{Authentication, PulsarClientException, Schema, PulsarClient as JPulsarClient}
@@ -10,8 +10,6 @@ import org.apache.pulsar.client.impl.auth._
 import org.apache.pulsar.client.impl.schema.SchemaInfoImpl
 import org.apache.pulsar.common.schema.{SchemaInfo, SchemaType}
 import otoroshi.env.Env
-import otoroshi.events.PulsarConfig
-import otoroshi.utils.http.MtlsConfig
 import otoroshi.utils.syntax.implicits._
 import play.api.libs.json.{JsNull, JsObject, JsValue, Json}
 
@@ -36,69 +34,57 @@ object PulsarBroker {
   }
 
   /** the native client: pulsar4s wraps it, and the healthcheck needs it */
-  def client(_env: otoroshi.env.Env, config: PulsarConfig, rawConfig: JsObject): JPulsarClient = {
+  def client(_env: otoroshi.env.Env, settings: PulsarSettings): JPulsarClient = {
     // TODO: moare options from config
-    val authOpt: Option[Authentication] = rawConfig.select("auth").asOpt[JsObject].map { obj =>
-      obj.select("kind").asOpt[String].getOrElse("disabled").toLowerCase() match {
-        case "basic" => new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(
-          obj.select("username").as[String],
-          obj.select("password").as[String],
-        ).getCommandData))
-        case "token" => new AuthenticationToken().seffectOn(_.configure(new AuthenticationDataToken(() => obj.select("token").as[String]).getCommandData))
-        case _ => new AuthenticationDisabled()
-      }
+    val auth: Authentication = settings.auth match {
+      case PulsarAuth.Basic(username, password) => new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(username, password).getCommandData))
+      case PulsarAuth.Token(token) => new AuthenticationToken().seffectOn(_.configure(new AuthenticationDataToken(() => token).getCommandData))
+      case PulsarAuth.Disabled => new AuthenticationDisabled()
     }
-    val builder = JPulsarClient.builder().serviceUrl(config.uri)
-    authOpt.foreach(builder.authentication)
-    if (config.mtlsConfig.mtls) {
-      val (_, jks, password) = config.mtlsConfig.toJKS(using _env)
+    val builder = JPulsarClient.builder().serviceUrl(settings.serviceUrl).authentication(auth)
+    if (settings.tls.enabled) {
+      val mtls = settings.tls.mtlsConfig
       builder
-        .enableTlsHostnameVerification(false)
-        .allowTlsInsecureConnection(config.mtlsConfig.trustAll)
-        .tlsTrustStoreType("JKS")
-        .tlsTrustStorePassword(password)
-        .tlsTrustCertsFilePath(jks.getAbsolutePath)
-        .useKeyStoreTls(true)
-      config.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
+        .enableTlsHostnameVerification(settings.tls.hostnameVerification)
+        .allowTlsInsecureConnection(settings.tls.trustAll)
+      if (settings.tls.clientCerts.nonEmpty || settings.tls.trustedCerts.nonEmpty) {
+        val (_, jks, password) = mtls.toJKS(using _env)
+        builder
+          .tlsTrustStoreType("JKS")
+          .tlsTrustStorePassword(password)
+          .tlsTrustCertsFilePath(jks.getAbsolutePath)
+          .useKeyStoreTls(true)
+      }
+      settings.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
     }
     builder.build()
   }
 
   // TODO: configure based on opts and global config
-  def producer(client: PulsarClient, config: PulsarConfig, topicName: String): PulsarProducer[ByteString] = {
-    val topic          = Topic(s"persistent://${config.tenant}/${config.namespace}/${topicName}")
-    val producerConfig = ProducerConfig(topic)
+  def producer(client: PulsarClient, topic: String): PulsarProducer[ByteString] = {
+    val producerConfig = ProducerConfig(Topic(topic))
     client.producer[ByteString](producerConfig)
   }
 
   // TODO: configure based on opts and global config
-  def consumer(client: PulsarClient, config: PulsarConfig, topicName: String): PulsarConsumer[ByteString] = {
-    val topic          = Topic(s"persistent://${config.tenant}/${config.namespace}/${topicName}")
-    val consumerConfig = ConsumerConfig(topics = Seq(topic), subscriptionName = Subscription("otoroshi"))
+  def consumer(client: PulsarClient, topic: String): PulsarConsumer[ByteString] = {
+    val consumerConfig = ConsumerConfig(topics = Seq(Topic(topic)), subscriptionName = Subscription("otoroshi"))
     client.consumer[ByteString](consumerConfig)
   }
 }
 
-class PulsarBrokerClient(val config: EventBrokerConnection) extends EventBrokerClient {
+class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSettings) extends EventBrokerClient {
 
-  private val pconfig = PulsarConfig.format.reads(config.settings).getOrElse(PulsarConfig( // TODO: handle auth !!!!!
-    uri = "pulsar://localhost:6650",
-    tlsTrustCertsFilePath = None,
-    tenant = "tenant",
-    namespace = "namespace",
-    topic = "test",
-    mtlsConfig = MtlsConfig(),
-    token = None,
-    username = None,
-    password = None,
-  ))
+  private def topicOf(name: Option[String]): String = settings.fullTopic(
+    name.orElse(settings.defaultTopic).getOrElse(throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic"))
+  )
   private val nativeRef = new AtomicReference[Option[JPulsarClient]](None)
   private val clientRef = new AtomicReference[Option[PulsarClient]](None)
 
   private def client: PulsarClient = clientRef.get().getOrElse(throw new IllegalStateException("the pulsar client is not started"))
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    val native = PulsarBroker.client(env, pconfig, config.settings)
+    val native = PulsarBroker.client(env, settings)
     nativeRef.set(Some(native))
     clientRef.set(Some(new DefaultPulsarClient(native)))
   }.flatMap(_ => healthcheck())
@@ -108,7 +94,7 @@ class PulsarBrokerClient(val config: EventBrokerConnection) extends EventBrokerC
   override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
     try {
       nativeRef.get().getOrElse(throw new IllegalStateException("the pulsar client is not started"))
-        .getPartitionsForTopic(s"persistent://${pconfig.tenant}/${pconfig.namespace}/${pconfig.topic}", false)
+        .getPartitionsForTopic(settings.fullTopic(settings.defaultTopic.getOrElse("otoroshi-healthcheck")), false)
         .get(10, TimeUnit.SECONDS)
       ()
     } catch {
@@ -127,8 +113,7 @@ class PulsarBrokerClient(val config: EventBrokerConnection) extends EventBrokerC
 
   // TODO: handle all stuff kafka handles
   override def publish(event: EventWrapper, opts: JsObject, contentType: String)(using env: Env, ec: ExecutionContext): Future[Either[JsValue, Option[JsValue]]] = {
-    val topic = event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String]).getOrElse(pconfig.topic)
-    val producer = PulsarBroker.producer(client, pconfig, topic)
+    val producer = PulsarBroker.producer(client, topicOf(event.vendorMetadata.get("topic").orElse(opts.select("topic").asOpt[String])))
     producer.sendAsync[Future](DefaultProducerMessage(
       key = event.key.map(_.utf8String),
       value = event.data,
@@ -142,9 +127,8 @@ class PulsarBrokerClient(val config: EventBrokerConnection) extends EventBrokerC
 
   override def consume(opts: JsObject)(using env: Env, ec: ExecutionContext): Source[EventWrapper, ?] = {
     // TODO: handle specifi pulsar stuff
-    val topic = opts.select("topic").asOpt[String].getOrElse(pconfig.topic)
     // val messageId = opts.select("from")
-    val consumer = PulsarBroker.consumer(client, pconfig, topic)
+    val consumer = PulsarBroker.consumer(client, topicOf(opts.select("topic").asOpt[String]))
     val source = com.sksamuel.pulsar4s.pekko.streams.source(() => consumer, Some(MessageId.latest)) // TODO: handle messageId
     source.map { csm =>
       val contentType = csm.props.get("content-type").getOrElse("binary")

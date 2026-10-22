@@ -14,7 +14,7 @@ class KafkaSuite extends BrokerSuite {
 
   override def startBroker(): Unit = { Brokers.kafka; () }
 
-  lazy val connection: String = Gateway.createConnection("kafka", Json.obj("servers" -> Json.arr(Brokers.kafka.getBootstrapServers), "topic" -> "default-topic"))
+  lazy val connection: String = Gateway.createConnection("kafka", Json.obj("bootstrap_servers" -> Json.arr(Brokers.kafka.getBootstrapServers), "default_topic" -> "default-topic"))
   lazy val ingester           = Gateway.brokerRoute[HttpEventsIngester](connection)
   lazy val consumer           = Gateway.brokerRoute[HttpEventsConsumer](connection)
   lazy val sse                = Gateway.brokerRoute[SseEventConsumer](connection)
