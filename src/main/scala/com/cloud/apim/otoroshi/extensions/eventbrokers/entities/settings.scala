@@ -1,6 +1,7 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers.entities
 
 import io.lettuce.core.RedisURI
+import org.apache.activemq.artemis.api.core.client.ActiveMQClient
 import otoroshi.events.{KafkaConfig, PulsarConfig, SaslConfig}
 import otoroshi.utils.http.MtlsConfig
 import play.api.libs.json.*
@@ -160,6 +161,7 @@ object BrokerSettings {
     case EventBrokerConnectionKind.Pulsar   => PulsarSettings.read(json)
     case EventBrokerConnectionKind.Redis    => RedisSettings.read(json)
     case EventBrokerConnectionKind.MQTT     => MqttSettings.read(json)
+    case EventBrokerConnectionKind.Artemis  => ArtemisSettings.read(json)
   }
 
   /** a starting point for a new connection: what the backoffice form shows first */
@@ -169,6 +171,7 @@ object BrokerSettings {
     case EventBrokerConnectionKind.Pulsar   => PulsarSettings(serviceUrl = "pulsar://localhost:6650", defaultTopic = Some("events"))
     case EventBrokerConnectionKind.Redis    => RedisSettings(uri = "redis://localhost:6379", defaultChannel = Some("events"))
     case EventBrokerConnectionKind.MQTT     => MqttSettings(host = "localhost", defaultTopic = Some("events"))
+    case EventBrokerConnectionKind.Artemis  => ArtemisSettings(url = "tcp://localhost:61616", defaultAddress = Some("events"))
   }
 }
 
@@ -582,6 +585,72 @@ object MqttSettings {
       sessionExpirySeconds = expiry,
       connectionTimeoutSeconds = f.intIn("connection_timeout_seconds", 10, 1, 300),
       keepAliveSeconds = f.intIn("keep_alive_seconds", 60, 0, 65535)
+    )
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+// artemis
+// -------------------------------------------------------------------------------------------------
+
+final case class ArtemisSettings(
+    /** a core url: `tcp://host:61616`, `(tcp://a:61616,tcp://b:61616)?ha=true`, with its netty parameters (`sslEnabled=true`, ...) */
+    url: String,
+    username: Option[String] = None,
+    password: Option[String] = None,
+    defaultAddress: Option[String] = None,
+    /** what an address is when the call does not say: multicast (every subscription gets every message) or anycast (a queue) */
+    defaultRoutingType: String = "multicast",
+    /** messages written to disk by the broker, kept across a restart */
+    durable: Boolean = true,
+    /** the event's source and id as duplicate id (`_AMQ_DUPL_ID`): the broker drops an event published twice */
+    duplicateDetection: Boolean = false,
+    /** what a consumer may buffer ahead, in bytes: 0 none, -1 no limit */
+    consumerWindowSize: Int = 1024 * 1024,
+    /** how many times the client reconnects on its own after losing the broker: -1 forever, 0 never */
+    reconnectAttempts: Int = -1,
+    /** how long a call to the broker (a send, a query) may wait for its answer */
+    callTimeoutMs: Long = 10000L
+) extends BrokerSettings {
+
+  def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.Artemis
+
+  def json: JsObject = Json.obj(
+    "url"                  -> url,
+    "username"             -> username,
+    "password"             -> password,
+    "default_address"      -> defaultAddress,
+    "default_routing_type" -> defaultRoutingType,
+    "durable"              -> durable,
+    "duplicate_detection"  -> duplicateDetection,
+    "consumer_window_size" -> consumerWindowSize,
+    "reconnect_attempts"   -> reconnectAttempts,
+    "call_timeout_ms"      -> callTimeoutMs
+  )
+}
+
+object ArtemisSettings {
+  def read(json: JsObject): Either[Seq[String], ArtemisSettings] = Fields.read(json) { f =>
+    val url     = f.requiredString("url").getOrElse("")
+    // builds nothing that connects: the locator only parses the url
+    f.check("url", url.isEmpty || Try(ActiveMQClient.createServerLocator(url).close()).isSuccess, "is not an artemis core url (tcp://host:61616)")
+    val window  = f.get[Int]("consumer_window_size", 1024 * 1024)
+    if (window < -1) f.error("consumer_window_size", "must be -1 (no limit), 0 (no buffer) or more")
+    val retries = f.get[Int]("reconnect_attempts", -1)
+    if (retries < -1) f.error("reconnect_attempts", "must be -1 (forever), 0 (never) or more")
+    val timeout = f.get[Long]("call_timeout_ms", 10000L)
+    if (timeout < 100) f.error("call_timeout_ms", "must be at least 100")
+    ArtemisSettings(
+      url = url,
+      username = f.optString("username"),
+      password = f.optString("password"),
+      defaultAddress = f.optString("default_address"),
+      defaultRoutingType = f.oneOf("default_routing_type", "multicast", Seq("multicast", "anycast")),
+      durable = f.get[Boolean]("durable", true),
+      duplicateDetection = f.get[Boolean]("duplicate_detection", false),
+      consumerWindowSize = window,
+      reconnectAttempts = retries,
+      callTimeoutMs = timeout
     )
   }
 }

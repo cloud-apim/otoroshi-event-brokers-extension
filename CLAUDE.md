@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-An Otoroshi admin extension that puts event brokers (Kafka, RabbitMQ, Pulsar, Redis pub/sub, MQTT)
+An Otoroshi admin extension that puts event brokers (Kafka, RabbitMQ, Pulsar, Redis pub/sub and
+streams, MQTT, ActiveMQ Artemis)
 behind Otoroshi routes: an `EventBrokerConnection` entity, and plugins that publish over HTTP and
 consume as newline-delimited JSON, server-sent events or websockets.
 
@@ -25,7 +26,8 @@ docker compose up -d                       # every broker on its default port, f
 
 The released jar is the **assembly**: amqp-client and the shaded HiveMQ mqtt client (with rxjava2) are
 shipped in it, while the Kafka
-(pekko-connectors-kafka), Pulsar (pulsar4s) and Redis (lettuce) clients come from Otoroshi's classpath.
+(pekko-connectors-kafka), Pulsar (pulsar4s), Redis (lettuce) and Artemis (artemis core client) clients come
+from Otoroshi's classpath.
 
 ## Architecture
 
@@ -38,7 +40,7 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   kind) and its datastore. The entity format stays lenient on purpose: a stored connection with wrong
   settings must stay listed to be fixed
 - **entities/settings.scala** - one settings case class per kind (`KafkaSettings`, `RabbitMQSettings`,
-  `PulsarSettings`, `RedisSettings`, `MqttSettings`), read with `Fields`: snake_case, every error
+  `PulsarSettings`, `RedisSettings`, `MqttSettings`, `ArtemisSettings`), read with `Fields`: snake_case, every error
   collected with its path, unknown fields refused, format checks skipped for `${vault://...}` values.
   `BrokerSettings.template(kind)` is what `_template?kind=` and the backoffice form start from. A new
   setting goes in the case class, its `read`, its `json`, the form (`EventBrokerConnectionsPage.js`)
@@ -54,7 +56,7 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy
   format) and `CloudEventBindings`: how an event becomes a `BrokerMessage` on each kind (binary mode
   with `ce_` headers on kafka, pulsar and redis streams (fields of the entry), `cloudEvents:` application
-  properties on rabbitmq, user properties on mqtt 5, structured payload on redis pub/sub and mqtt 3.1.1)
+  properties on rabbitmq, `cloudEvents_` properties on artemis (jms compatible), user properties on mqtt 5, structured payload on redis pub/sub and mqtt 3.1.1)
   and back, a message without cloudevents attributes being synthesized
   (position as id, `/<kind>/<topic>` as source), broker metadata added as `<kind><name>` extensions
 - **api.scala** - `BrokerMessage`, a message as a broker carries it (key, data, headers, metadata:
@@ -72,11 +74,13 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   - `capabilities` (acks, groups, replay, keys, headers): `PluginUtils.subscribe` refuses a spec the
     broker cannot serve. Keep them and the readme's table in sync
 - **clients/** - one `EventBrokerClient` per broker kind; redis has two, pub/sub (redis.scala) and
-  streams (redisstreams.scala), picked by the `mode` of the connection
+  streams (redisstreams.scala), picked by the `mode` of the connection. artemis.scala speaks the core
+  protocol (addresses, routing types, queues), not jms; a subscription's session delivers on a thread
+  that waits while the subscriber is behind (the consumer window then stops the broker)
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
   `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
-  them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka positions
-  for `Last-Event-ID` resume); utils.scala holds the shared plugin config
+  them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka offsets or
+  redis stream ids, for `Last-Event-ID` resume); utils.scala holds the shared plugin config
   (`EventBrokerPluginConfig`: `options` fixed by the route and evaluated with the expression language,
   `allowed_overrides`, `allowed_topics`), `CallOptions` (the policy: a caller option not allowed is a
   400, caller values are never evaluated, per-event routing is checked too), `subscriptionSpec`

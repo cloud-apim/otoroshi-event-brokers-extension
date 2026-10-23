@@ -134,6 +134,19 @@ class SettingsSuite extends munit.FunSuite {
     assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("maxlen" -> 10)), "streams.maxlen: unknown field")
   }
 
+  test("artemis") {
+    assertEquals(read(Artemis, Json.obj("url" -> "tcp://a:61616")), Right(ArtemisSettings(url = "tcp://a:61616")))
+    assertEquals(ArtemisSettings(url = "tcp://a:61616").defaultRoutingType, "multicast")
+    assert(read(Artemis, Json.obj("url" -> "(tcp://a:61616,tcp://b:61616)?ha=true&sslEnabled=true")).isRight)
+    assertError(Artemis, Json.obj(), "url: required")
+    assertError(Artemis, Json.obj("url" -> "http://a"), "url: is not an artemis core url")
+    assertError(Artemis, Json.obj("url" -> "tcp://a", "default_routing_type" -> "broadcast"), "default_routing_type: must be one of multicast, anycast")
+    assertError(Artemis, Json.obj("url" -> "tcp://a", "consumer_window_size" -> -2), "consumer_window_size: must be -1")
+    assertError(Artemis, Json.obj("url" -> "tcp://a", "reconnect_attempts" -> -5), "reconnect_attempts: must be -1")
+    assertError(Artemis, Json.obj("url" -> "tcp://a", "call_timeout_ms" -> 1), "call_timeout_ms: must be at least 100")
+    assert(read(Artemis, Json.obj("url" -> "${vault://local/artemis/url}")).isRight)
+  }
+
   test("values that come from a vault are only checked once resolved") {
     assert(read(Kafka, Json.obj("bootstrap_servers" -> Json.arr("${vault://local/kafka/servers}"))).isRight)
     assert(read(Redis, Json.obj("uri" -> "${vault://local/redis/uri}")).isRight)

@@ -65,6 +65,7 @@ class EventBrokerConnectionsPage extends Component {
           { 'label': 'Pulsar', value: 'pulsar' },
           { 'label': 'MQTT', value: 'mqtt' },
           { 'label': 'Redis', value: 'redis' },
+          { 'label': 'ActiveMQ Artemis', value: 'artemis' },
         ] }
     },
     'settings': {
@@ -132,6 +133,20 @@ class EventBrokerConnectionsPage extends Component {
     'settings.streams.claim_min_idle_ms': input('number', 'Claim after (ms)', { help: 'An entry left unacked that long by a member of a group goes to another one. 0: never' }),
     'settings.tls.start_tls': input('bool', 'STARTTLS'),
     'settings.tls.verify_peer': input('bool', 'Verify the server certificate'),
+    // artemis
+    'settings.url': input('string', 'URL', { placeholder: 'tcp://host:61616', help: 'A core url, with its parameters: (tcp://a:61616,tcp://b:61616)?ha=true, sslEnabled=true, ...' }),
+    'settings.default_address': input('string', 'Default address', { help: 'Used when a call names no address' }),
+    'settings.default_routing_type': input('select', 'Default routing type', {
+      possibleValues: [
+        { value: 'multicast', label: 'Multicast (every subscription gets every message)' },
+        { value: 'anycast', label: 'Anycast (a queue its consumers share)' },
+      ],
+    }),
+    'settings.durable': input('bool', 'Durable messages'),
+    'settings.duplicate_detection': input('bool', 'Duplicate detection', { help: 'The broker drops an event published twice (same source and id)' }),
+    'settings.consumer_window_size': input('number', 'Consumer window size (bytes)', { help: 'What a consumer buffers ahead: 0 none, -1 no limit' }),
+    'settings.reconnect_attempts': input('number', 'Reconnect attempts', { help: '-1 forever, 0 never' }),
+    'settings.call_timeout_ms': input('number', 'Call timeout (ms)'),
     // mqtt
     'settings.version': input('select', 'MQTT version', {
       possibleValues: [
@@ -249,6 +264,21 @@ class EventBrokerConnectionsPage extends Component {
           '>>>TLS',
           'settings.tls.start_tls',
           'settings.tls.verify_peer',
+        ]);
+      case 'artemis':
+        return head.concat([
+          'settings.url',
+          'settings.default_address',
+          'settings.default_routing_type',
+          'settings.durable',
+          'settings.duplicate_detection',
+          '>>>Authentication',
+          'settings.username',
+          'settings.password',
+          '>>>Client',
+          'settings.consumer_window_size',
+          'settings.reconnect_attempts',
+          'settings.call_timeout_ms',
         ]);
       case 'mqtt':
         return head.concat([

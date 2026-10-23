@@ -20,6 +20,7 @@ enum EventBrokerConnectionKind(val name: String, val label: String) {
   case Pulsar   extends EventBrokerConnectionKind("pulsar", "Pulsar")
   case Redis    extends EventBrokerConnectionKind("redis", "Redis")
   case MQTT     extends EventBrokerConnectionKind("mqtt", "MQTT")
+  case Artemis  extends EventBrokerConnectionKind("artemis", "ActiveMQ Artemis")
   def json: JsValue = name.json
 }
 
@@ -63,6 +64,7 @@ case class EventBrokerConnection(
     case Right(s: KafkaSettings)    => new KafkaBrokerClient(this, s, env)
     case Right(s: PulsarSettings)   => new PulsarBrokerClient(this, s)
     case Right(s: RedisSettings)    => if (s.isStreams) new RedisStreamsBrokerClient(this, s) else new RedisBrokerClient(this, s)
+    case Right(s: ArtemisSettings)  => new ArtemisBrokerClient(this, s)
     case Right(s: MqttSettings)     => new MQTTBrokerClient(this, s)
     case Right(s: RabbitMQSettings) => new RabbitMqBrokerClient(this, s)
   }
