@@ -41,7 +41,7 @@ lazy val root = (project in file("."))
       "org.playframework" %% "play-json" % playJsonVersion,
     ),
     libraryDependencies ++= Seq(
-      "fr.maif" %% "otoroshi" % "18.0.0-rc3" % "provided",
+      "fr.maif" %% "otoroshi" % "18.0.0" % "provided",
       "com.rabbitmq" % "amqp-client" % "5.20.0" excludeAll(excludesSlf4j: _*),
       // shaded: it brings its own netty (with websockets and tls), which otoroshi's netty 4.2 never meets
       "com.hivemq" % "hivemq-mqtt-client-shaded" % "1.4.0" excludeAll(ExclusionRule(organization = "org.reactivestreams")),
