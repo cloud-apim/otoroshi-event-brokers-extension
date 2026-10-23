@@ -329,9 +329,9 @@ final class ConnectionSlot private[eventbrokers] (val id: String, manager: Conne
   def json: JsObject = {
     val connection = next.orElse(active).map(_.connection)
     Json.obj(
-      "id"   -> id,
-      "name" -> connection.map(_.name),
-      "kind" -> connection.map(_.kind.name)
+      "id"     -> id,
+      "name"   -> connection.map(_.name),
+      "broker" -> connection.map(_.kind.name)
     ) ++ active.map(_.status.json).getOrElse(Json.obj()) ++ Json.obj(
       // newer settings, not connected yet: the previous ones still serve the requests
       "pending" -> next.map(_.status.json)

@@ -1,8 +1,8 @@
-// inlined after EventBrokerConnectionsPage.js, whose `input` and `certificates` it uses
+// inlined after EventBrokerConnectionsPage.js, whose `input`, `certificates` and `saved` it uses
 
 const connectionsOptions = {
   valuesFrom: '/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections',
-  transformer: (a) => ({ value: a.id, label: `${a.name} (${a.kind})` }),
+  transformer: (a) => ({ value: a.id, label: `${a.name} (${a.broker})` }),
 };
 
 class EventBrokerWebhooksPage extends Component {
@@ -66,11 +66,8 @@ class EventBrokerWebhooksPage extends Component {
         if (!item.enabled) return React.createElement('span', { className: 'badge bg-secondary' }, 'disabled');
         if (!status) return React.createElement('span', { className: 'badge bg-secondary' }, 'unknown');
         const label = status.delivering ? `delivering (${status.delivered})` : status.owner ? `on ${status.owner}` : 'waiting';
-        return React.createElement(
-          'span',
-          { className: `badge ${status.last_error ? 'bg-warning' : 'bg-success'}`, title: status.last_error ? status.last_error.message : '' },
-          label
-        );
+        const color = status.last_error ? 'bg-warning' : status.delivering || status.owner ? 'bg-success' : 'bg-secondary';
+        return React.createElement('span', { className: `badge ${color}`, title: status.last_error ? status.last_error.message : '' }, label);
       },
     },
   ];
@@ -85,6 +82,8 @@ class EventBrokerWebhooksPage extends Component {
     '>>>Dead letters', 'dead_letter.connection', 'dead_letter.options',
   ];
 
+  state = { node: null };
+
   // as seen by the node serving the backoffice: the one holding a webhook delivers it
   fetchStatuses = () => {
     return fetch('/bo/api/proxy/api/extensions/cloud-apim/event-brokers/webhooks/_status', {
@@ -92,15 +91,25 @@ class EventBrokerWebhooksPage extends Component {
       credentials: 'include',
       headers: { Accept: 'application/json' },
     })
-      .then((r) => (r.status === 200 ? r.json() : { webhooks: [] }))
-      .then((body) => _.keyBy(body.webhooks || [], 'id'))
+      .then((r) => (r.status === 200 ? r.json() : {}))
       .catch(() => ({}));
   };
 
   fetchItems = () => {
-    return Promise.all([this.client.findAll(), this.fetchStatuses()]).then(([items, statuses]) =>
-      (items || []).map((item) => ({ ...item, _status: statuses[item.id] }))
-    );
+    return Promise.all([this.client.findAll(), this.fetchStatuses()]).then(([items, body]) => {
+      this.setState({ node: body.node || null });
+      const statuses = _.keyBy(body.webhooks || [], 'id');
+      return (items || []).map((item) => ({ ...item, _status: statuses[item.id] }));
+    });
+  };
+
+  // why this node delivers nothing, when it does not: its badges alone would only say waiting
+  nodeWarning = () => {
+    const node = this.state.node;
+    if (!node) return null;
+    if (node.enabled === false) return 'This node delivers no webhook: they are turned off (webhooks.enabled).';
+    if (node.locks && node.locks.kind === 'none') return `This node delivers no webhook: ${node.locks.error}.`;
+    return null;
   };
 
   fetchTemplate = () => {
@@ -126,7 +135,9 @@ class EventBrokerWebhooksPage extends Component {
   };
 
   render() {
-    return React.createElement(Table, {
+    const warning = this.nodeWarning();
+    return React.createElement('div', null, warning ? React.createElement('div', { key: 'w', className: 'alert alert-warning' }, warning) : null, React.createElement(Table, {
+      key: 't',
       parentProps: this.props,
       selfUrl: 'extensions/cloud-apim/event-brokers/webhooks',
       defaultTitle: 'All event broker webhooks',
@@ -137,9 +148,9 @@ class EventBrokerWebhooksPage extends Component {
       columns: this.columns,
       stayAfterSave: true,
       fetchItems: (paginationState) => this.fetchItems(),
-      updateItem: (item) => this.client.update(this.clean(item)),
+      updateItem: (item) => saved(this.client.update(this.clean(item)), 'Webhook'),
       deleteItem: (item) => this.client.delete(this.clean(item)),
-      createItem: (item) => this.client.create(this.clean(item)),
+      createItem: (item) => saved(this.client.create(this.clean(item)), 'Webhook'),
       navigateTo: (item) => {
         window.location = `/bo/dashboard/extensions/cloud-apim/event-brokers/webhooks/edit/${item.id}`;
       },
@@ -150,6 +161,6 @@ class EventBrokerWebhooksPage extends Component {
       extractKey: (item) => item.id,
       export: true,
       kubernetesKind: 'event-brokers.extensions.cloud-apim.com/EventBrokerWebhook',
-    }, null);
+    }, null));
   }
 }

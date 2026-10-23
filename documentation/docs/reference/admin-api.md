@@ -16,7 +16,7 @@ on a fresh Otoroshi), on its host (`otoroshi-api.oto.tools`).
 | Webhooks | `/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-webhooks` |
 
 The usual routes of Otoroshi's entities: `GET` (all), `GET /<id>`, `POST`, `PUT /<id>`, `PATCH /<id>`,
-`DELETE /<id>`, `_template` (`_template?kind=<kind>` for a connection), bulk routes. A write whose
+`DELETE /<id>`, `_template` (`_template?broker=<broker>` for a connection), bulk routes. A write whose
 settings are not valid is a `400` listing every field at fault.
 
 ## Routes

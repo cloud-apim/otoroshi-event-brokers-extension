@@ -174,7 +174,7 @@ object Gateway {
       "description" -> "created by the integration tests",
       "tags"        -> Json.arr(),
       "metadata"    -> Json.obj(),
-      "kind"        -> kind,
+      "broker"      -> kind,
       "settings"    -> settings
     )
   )

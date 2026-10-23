@@ -42,7 +42,7 @@ In the backoffice, **Event broker connections** → **Add item**, kind `kafka`, 
 curl -X POST http://otoroshi-api.oto.tools:8080/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections \
   -u admin-api-apikey-id:admin-api-apikey-secret -H 'Content-Type: application/json' -d '{
     "id": "connection_kafka", "name": "kafka", "description": "", "tags": [], "metadata": {},
-    "kind": "kafka", "settings": { "bootstrap_servers": ["localhost:9093"], "default_topic": "orders" }
+    "broker": "kafka", "settings": { "bootstrap_servers": ["localhost:9093"], "default_topic": "orders" }
   }'
 ```
 

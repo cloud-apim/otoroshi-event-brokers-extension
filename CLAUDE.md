@@ -38,11 +38,12 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **entities/connections.scala** - `EventBrokerConnection` (kind + raw `settings` JSON, read lazily as
   `typedSettings`), its admin API resource (the `writeValidator` refuses settings that do not fit the
   kind) and its datastore. The entity format stays lenient on purpose: a stored connection with wrong
-  settings must stay listed to be fixed
+  settings must stay listed to be fixed. In json the kind is `broker`, never `kind`: otoroshi's admin api
+  overwrites `kind` with the resource kind on everything it serves (`brokerOf` still reads an old `kind`)
 - **entities/settings.scala** - one settings case class per kind (`KafkaSettings`, `RabbitMQSettings`,
   `PulsarSettings`, `RedisSettings`, `MqttSettings`, `ArtemisSettings`), read with `Fields`: snake_case, every error
   collected with its path, unknown fields refused, format checks skipped for `${vault://...}` values.
-  `BrokerSettings.template(kind)` is what `_template?kind=` and the backoffice form start from. A new
+  `BrokerSettings.template(kind)` is what `_template?broker=` and the backoffice form start from. A new
   setting goes in the case class, its `read`, its `json`, the form (`EventBrokerConnectionsPage.js`)
   and `SettingsSuite`
 - **manager.scala** - `ConnectionManager`, owned by the extension and fed by `syncStates`: one

@@ -43,7 +43,7 @@ The plugin points to a connection that does not exist (`connection_not_found`).
 ## A webhook does not deliver
 
 Its [status](../features/webhooks.md#status): `owner` empty and an error in a cluster means the shared
-Redis is missing (`webhooks.redis.uri`). `last_error` gives the last failure of a delivery; an
+Redis is missing (`webhooks.redis.uri`); the webhooks page of the backoffice says so above the list. `last_error` gives the last failure of a delivery; an
 `EventBrokerWebhookDeliveryFailed` alert is sent for every event given up on without dead letters.
 
 ## Logs

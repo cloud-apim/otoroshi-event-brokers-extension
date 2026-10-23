@@ -13,7 +13,7 @@ Sent each time a connection changes state on a node.
 {
   "@id": "...", "@timestamp": 1792663171364, "@type": "EventBrokerConnectionEvent",
   "@product": "otoroshi", "@serviceId": "connection_...", "@service": "orders", "@env": "prod",
-  "connection": { "id": "connection_...", "name": "orders", "kind": "kafka" },
+  "connection": { "id": "connection_...", "name": "orders", "broker": "kafka" },
   "previous_state": "connecting",
   "state": "connected",
   "status": { "state": "connected", "since": 1792663171364, "error": null, "failures": 0 }
@@ -28,7 +28,7 @@ its broker. One per outage.
 ```json
 {
   "@type": "AlertEvent", "alert": "EventBrokerConnectionUnavailable",
-  "connection": { "id": "connection_...", "name": "orders", "kind": "kafka" },
+  "connection": { "id": "connection_...", "name": "orders", "broker": "kafka" },
   "previous_state": "connected",
   "error": "TimeoutException: ...",
   "status": { "state": "unavailable", "failures": 2 }

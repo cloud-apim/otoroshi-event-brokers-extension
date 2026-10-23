@@ -5,8 +5,9 @@ description: Publish a test event, or peek at what a topic or a queue holds, fro
 
 # Try a connection
 
-The page of a connection in the backoffice has a **Try it** section: the options of a call (as JSON),
-an event, and two buttons, **Publish** and **Peek**. The same is in the admin API.
+The page of a connection in the backoffice has a **Try it** section, once the connection is saved: the
+options of a call (as JSON, `{}` for the default topic of the connection), an event, and two buttons,
+**Publish** and **Peek**. The same is in the admin API.
 
 ## Publish
 

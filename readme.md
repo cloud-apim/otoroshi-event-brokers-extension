@@ -7,7 +7,7 @@ them.
 
 **Documentation: <https://cloud-apim.github.io/otoroshi-event-brokers-extension/>**
 
-| Kind       | Broker                                              | Client                              |
+| `broker`   | Broker                                              | Client                              |
 |------------|-----------------------------------------------------|-------------------------------------|
 | `kafka`    | Apache Kafka                                        | pekko-connectors-kafka (otoroshi)   |
 | `rabbitmq` | RabbitMQ (AMQP 0.9.1), classic, quorum and stream queues | amqp-client 5                  |

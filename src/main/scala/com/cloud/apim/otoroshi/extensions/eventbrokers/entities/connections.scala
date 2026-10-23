@@ -72,13 +72,21 @@ case class EventBrokerConnection(
 
 object EventBrokerConnection {
 
-  /** what the admin api refuses to write: an unknown kind, settings that do not fit it */
+  /**
+   * the broker of a connection, in its json. `broker`, and not `kind`: otoroshi's admin api writes the
+   * kind of the resource (`event-brokers.extensions.cloud-apim.com/EventBrokerConnection`) in `kind`
+   * on everything it serves. a `kind` naming a broker is still read (written before)
+   */
+  def brokerOf(json: JsValue): Option[String] =
+    (json \ "broker").asOpt[String].orElse((json \ "kind").asOpt[String].filter(k => EventBrokerConnectionKind(k).isDefined))
+
+  /** what the admin api refuses to write: an unknown broker, settings that do not fit it */
   def validate(entity: EventBrokerConnection, body: JsValue): Either[Seq[String], EventBrokerConnection] = {
-    val kindErrors = (body \ "kind").asOpt[String] match {
-      case None                                                 => Seq("kind: required")
-      case Some(kind) if EventBrokerConnectionKind(kind).isEmpty =>
-        Seq(s"kind: must be one of ${EventBrokerConnectionKind.values.map(_.name).mkString(", ")}")
-      case _                                                    => Seq.empty
+    val kindErrors = brokerOf(body) match {
+      case None                                                     => Seq("broker: required")
+      case Some(broker) if EventBrokerConnectionKind(broker).isEmpty =>
+        Seq(s"broker: must be one of ${EventBrokerConnectionKind.values.map(_.name).mkString(", ")}")
+      case _                                                        => Seq.empty
     }
     val settingsErrors = if (kindErrors.nonEmpty) Seq.empty else entity.typedSettings.left.toOption.toSeq.flatten.map(e => s"settings.$e")
     val errors         = kindErrors ++ settingsErrors
@@ -103,7 +111,7 @@ object EventBrokerConnection {
       "description" -> o.description,
       "metadata"    -> o.metadata,
       "tags"        -> JsArray(o.tags.map(JsString.apply)),
-      "kind"        -> o.kind.json,
+      "broker"      -> o.kind.json,
       "settings"    -> o.settings,
     )
     override def reads(json: JsValue): JsResult[EventBrokerConnection] = Try {
@@ -114,7 +122,7 @@ object EventBrokerConnection {
         description = (json \ "description").as[String],
         metadata = (json \ "metadata").asOpt[Map[String, String]].getOrElse(Map.empty),
         tags = (json \ "tags").asOpt[Seq[String]].getOrElse(Seq.empty[String]),
-        kind = (json \ "kind").asOpt[String].flatMap(EventBrokerConnectionKind.apply).getOrElse(EventBrokerConnectionKind.Kafka),
+        kind = brokerOf(json).flatMap(EventBrokerConnectionKind.apply).getOrElse(EventBrokerConnectionKind.Kafka),
         settings = (json \ "settings").asOpt[JsObject].getOrElse(Json.obj()),
       )
     } match {
@@ -136,8 +144,8 @@ object EventBrokerConnection {
         extractIdf = c => datastores.eventBrokerConnectionDatastore.extractId(c),
         extractIdJsonf = json => json.select("id").asString,
         idFieldNamef = () => "id",
-        // ?kind=pulsar for the template of a kind, kafka without
-        tmpl = (_, p, _) => template(p.get("kind").flatMap(EventBrokerConnectionKind.apply).getOrElse(EventBrokerConnectionKind.Kafka), env).json,
+        // ?broker=pulsar for the template of a broker, kafka without
+        tmpl = (_, p, _) => template(p.get("broker").orElse(p.get("kind")).flatMap(EventBrokerConnectionKind.apply).getOrElse(EventBrokerConnectionKind.Kafka), env).json,
         canRead = true,
         canCreate = true,
         canUpdate = true,

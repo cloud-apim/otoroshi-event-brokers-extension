@@ -11,6 +11,22 @@ const certificates = {
   transformer: (a) => ({ value: a.id, label: a.name }),
 };
 
+// the admin api answers a refused write with its errors, which the table would drop without a word
+function saved(promise, what) {
+  return promise.then((res) => {
+    if (res && res.error) {
+      const described = res.error_description || res.error;
+      const errors = Array.isArray(described) ? described : [described];
+      window.newAlert(
+        React.createElement('ul', { className: 'mb-0' }, errors.map((error, i) => React.createElement('li', { key: i }, String(error)))),
+        `${what} not saved`
+      );
+      return Promise.reject(new Error(errors.join(', ')));
+    }
+    return res;
+  });
+}
+
 const connectionStatusColors = {
   connected: 'bg-success',
   connecting: 'bg-info',
@@ -35,7 +51,8 @@ function connectionStatusBadge(status) {
 
 // publishes a test event, or peeks at what a topic or a queue holds, through the saved connection
 class ConnectionTryout extends Component {
-  state = { options: '{\n  "topic": "events"\n}', data: '{\n  "hello": "world"\n}', result: null, running: false };
+  // no options: the default topic of the connection
+  state = { options: '{}', data: '{\n  "hello": "world"\n}', result: null, running: false };
 
   query = (extra) => {
     const options = { ...JSON.parse(this.state.options || '{}'), ...extra };
@@ -56,7 +73,8 @@ class ConnectionTryout extends Component {
     this.setState({ running: true, result: null });
     fetch(`/bo/api/proxy/api/extensions/cloud-apim/event-brokers/connections/${id}/${path}?${query}`, {
       credentials: 'include',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      // a content type without a body: the backoffice proxy answers 400 before the call goes through
+      headers: init.body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
       ...init,
     })
       .then((r) => r.text().then((text) => `${r.status}\n${(() => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return text; } })()}`))
@@ -79,7 +97,7 @@ class ConnectionTryout extends Component {
         onChange: (e) => this.setState({ [key]: e.target.value }),
       });
     return React.createElement('div', null, [
-      React.createElement('div', { key: 'h', className: 'mb-3' }, 'With the saved settings of this connection, as seen by this node. A peek never acks: what it reads from a queue or a group goes back.'),
+      React.createElement('div', { key: 'h', className: 'mb-3' }, 'With the saved settings of this connection, as seen by this node. The options are those of a route ({"topic": "orders", "from": "earliest", "group": "..."}), the default topic of the connection without one. A peek never acks: what it reads from a queue or a group goes back.'),
       React.createElement('div', { key: 'o' }, row('Options', area('options', 3))),
       React.createElement('div', { key: 'd' }, row('Event', area('data', 4))),
       React.createElement('div', { key: 'b' }, row('', [
@@ -102,11 +120,11 @@ class EventBrokerConnectionsPage extends Component {
     id: { type: 'string', disabled: true, props: { label: 'Id', placeholder: '---' } },
     name: {
       type: 'string',
-      props: { label: 'Name', placeholder: 'My Awesome Provider' },
+      props: { label: 'Name', placeholder: 'Orders' },
     },
     description: {
       type: 'string',
-      props: { label: 'Description', placeholder: 'Description of the Provider' },
+      props: { label: 'Description', placeholder: 'Description of the connection' },
     },
     metadata: {
       type: 'object',
@@ -116,9 +134,10 @@ class EventBrokerConnectionsPage extends Component {
       type: 'array',
       props: { label: 'Tags' },
     },
-    'kind': {
+    // not `kind`: otoroshi's api writes the kind of the resource there
+    'broker': {
       'type': 'select',
-      props: { label: 'Kind', possibleValues: [
+      props: { label: 'Broker', possibleValues: [
           { 'label': 'RabbitMQ', value: 'rabbitmq' },
           { 'label': 'Kafka', value: 'kafka' },
           { 'label': 'Pulsar', value: 'pulsar' },
@@ -260,7 +279,7 @@ class EventBrokerConnectionsPage extends Component {
       filterId: 'name',
       content: (item) => item.name,
     },
-    { title: 'Kind', filterId: 'kind', content: (item) => item.kind },
+    { title: 'Broker', filterId: 'broker', content: (item) => item.broker },
     {
       title: 'Status',
       notFilterable: true,
@@ -298,12 +317,13 @@ class EventBrokerConnectionsPage extends Component {
     );
   };
 
-  formFlow = (state) => this.kindFlow(state).concat(state && state.id ? ['>>>Try it', '_tryout'] : []);
+  // a connection is only tried once saved: the nodes know nothing of the form being filled
+  formFlow = (state) => this.brokerFlow(state).concat(window.location.pathname.indexOf('/edit/') > -1 ? ['>>>Try it', '_tryout'] : []);
 
-  kindFlow = (state) => {
-    const head = ['_loc', 'id', 'name', 'description', '>>>Metadata and tags', 'tags', 'metadata', '<<<Connection', 'kind'];
+  brokerFlow = (state) => {
+    const head = ['_loc', 'id', 'name', 'description', '>>>Metadata and tags', 'tags', 'metadata', '<<<Connection', 'broker'];
     const tls = ['settings.tls.enabled', 'settings.tls.client_certs', 'settings.tls.trusted_certs', 'settings.tls.trust_all', 'settings.tls.hostname_verification'];
-    switch (state.kind) {
+    switch (state.broker) {
       case 'kafka':
         return head.concat([
           'settings.bootstrap_servers',
@@ -408,9 +428,9 @@ class EventBrokerConnectionsPage extends Component {
     }
   }
 
-  // the server knows the defaults of every kind: the form starts from its template
-  fetchTemplate = (kind) => {
-    return fetch(`/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections/_template?kind=${kind}`, {
+  // the server knows the defaults of every broker: the form starts from its template
+  fetchTemplate = (broker) => {
+    return fetch(`/bo/api/proxy/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections/_template?broker=${broker}`, {
       method: 'GET',
       credentials: 'include',
       headers: { Accept: 'application/json' },
@@ -437,9 +457,9 @@ class EventBrokerConnectionsPage extends Component {
         stayAfterSave: true,
         fetchItems: (paginationState) => this.fetchItems(),
         // the status is only shown, never saved
-        updateItem: (item) => this.client.update(_.omit(item, ['_status', '_tryout'])),
+        updateItem: (item) => saved(this.client.update(_.omit(item, ['_status', '_tryout'])), 'Connection'),
         deleteItem: (item) => this.client.delete(_.omit(item, ['_status', '_tryout'])),
-        createItem: (item) => this.client.create(_.omit(item, ['_status', '_tryout'])),
+        createItem: (item) => saved(this.client.create(_.omit(item, ['_status', '_tryout'])), 'Connection'),
         navigateTo: (item) => {
           window.location = `/bo/dashboard/extensions/cloud-apim/event-brokers/connections/edit/${item.id}`
         },
@@ -451,9 +471,11 @@ class EventBrokerConnectionsPage extends Component {
         export: true,
         kubernetesKind: "event-brokers.extensions.cloud-apim.com/EventBrokerConnection",
         onStateChange: (state, oldState, update) => {
-          if (oldState.kind && !_.isEqual(state.kind, oldState.kind)) {
-            this.fetchTemplate(state.kind).then((template) => {
-              update({ ...state, settings: template.settings });
+          if (oldState.broker && !_.isEqual(state.broker, oldState.broker)) {
+            Promise.all([this.fetchTemplate(oldState.broker), this.fetchTemplate(state.broker)]).then(([previous, template]) => {
+              // a name or a description left as the previous broker's template had it follows the broker
+              const following = (field) => (state[field] === previous[field] ? template[field] : state[field]);
+              update({ ...state, name: following('name'), description: following('description'), settings: template.settings });
             });
           }
         }

@@ -7,9 +7,9 @@ import otoroshi.events.{AlertEvent, AnalyticEvent}
 import play.api.libs.json.*
 
 private def connectionJson(connection: EventBrokerConnection): JsObject = Json.obj(
-  "id"   -> connection.id,
-  "name" -> connection.name,
-  "kind" -> connection.kind.name
+  "id"     -> connection.id,
+  "name"   -> connection.name,
+  "broker" -> connection.kind.name
 )
 
 /**

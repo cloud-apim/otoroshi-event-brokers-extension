@@ -96,4 +96,6 @@ Taken on 2026-10-22, not to be discussed again:
 
 - [x] Repository and artifacts renamed otoroshi-event-brokers-extension
   ([#11](https://github.com/cloud-apim/otoroshi-event-brokers-extension/pull/11))
-- [ ] Backoffice forms checked in a real browser (so far only smoke-tested with node)
+- [x] Backoffice forms checked in a real browser, on Otoroshi 18.0.0: the broker of a connection is
+  `broker` in json (otoroshi's admin api writes the resource kind in `kind`), refused writes are shown,
+  Try it peeks through the backoffice proxy, the webhooks page says why a node delivers nothing

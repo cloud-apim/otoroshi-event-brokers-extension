@@ -5,23 +5,25 @@ description: The connection entity, how every node keeps its clients, and their 
 
 # Connections
 
-A connection is an entity of the extension: a `kind` of broker and its `settings`.
+A connection is an entity of the extension: a `broker` (`kafka`, `rabbitmq`, `pulsar`, `redis`, `mqtt`,
+`artemis`) and its `settings`. Not `kind`: the admin API of Otoroshi writes the kind of the resource
+there, on everything it serves (a `kind` naming a broker is still read).
 
 ```json
-{ "id": "connection_...", "name": "orders", "kind": "kafka", "settings": { "bootstrap_servers": ["kafka:9092"] } }
+{ "id": "connection_...", "name": "orders", "broker": "kafka", "settings": { "bootstrap_servers": ["kafka:9092"] } }
 ```
 
 | Entity | Kind | Admin API |
 |---|---|---|
 | Event broker connection | `event-brokers.extensions.cloud-apim.com/EventBrokerConnection` | `/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections` |
 
-The settings of each kind: [Kafka](./kafka.md), [RabbitMQ](./rabbitmq.md), [Pulsar](./pulsar.md),
+The settings of each broker: [Kafka](./kafka.md), [RabbitMQ](./rabbitmq.md), [Pulsar](./pulsar.md),
 [Redis](./redis.md), [MQTT](./mqtt.md), [Artemis](./artemis.md), and [TLS and
-authentication](./tls-and-auth.md), the same on every kind.
+authentication](./tls-and-auth.md), the same on every broker.
 
 ## Settings are checked
 
-The admin API refuses settings that do not fit their kind, with every field at fault:
+The admin API refuses settings that do not fit their broker, with every field at fault:
 
 ```json
 {
@@ -31,7 +33,7 @@ The admin API refuses settings that do not fit their kind, with every field at f
 }
 ```
 
-Unknown fields are errors: a typo is never silently ignored. `GET .../event-broker-connections/_template?kind=<kind>`
+Unknown fields are errors: a typo is never silently ignored. `GET .../event-broker-connections/_template?broker=<broker>`
 gives a valid starting point, which the backoffice form starts from.
 
 Any string can be a [vault](https://www.otoroshi.io/docs/topics/secrets) reference
@@ -81,7 +83,7 @@ curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/
 
 ```json
 {
-  "id": "connection_...", "name": "orders", "kind": "kafka",
+  "id": "connection_...", "name": "orders", "broker": "kafka",
   "state": "connected", "since": 1792663171364, "error": null, "failures": 0,
   "last_check_at": 1792663181364, "next_attempt_at": null,
   "pending": null,

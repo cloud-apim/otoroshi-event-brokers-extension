@@ -20,7 +20,7 @@ class ConnectionsApiSuite extends munit.FunSuite {
     "description" -> "",
     "tags"        -> Json.arr(),
     "metadata"    -> Json.obj(),
-    "kind"        -> kind,
+    "broker"      -> kind,
     "settings"    -> settings
   )
 
@@ -46,14 +46,14 @@ class ConnectionsApiSuite extends munit.FunSuite {
   test("an unknown kind is refused") {
     val res = post(body("nats", Json.obj()))
     assertEquals(res.status, 400, res.body)
-    assert(description(res).contains("kind: must be one of"), res.body)
+    assert(description(res).contains("broker: must be one of"), res.body)
   }
 
   test("the template of every kind is a valid connection") {
     EventBrokerConnectionKind.values.foreach { kind =>
-      val template = await(Gateway.admin(s"${Gateway.connectionsPath}/_template?kind=${kind.name}").get())
+      val template = await(Gateway.admin(s"${Gateway.connectionsPath}/_template?broker=${kind.name}").get())
       assertEquals(template.status, 200, template.body)
-      assertEquals((template.json \ "kind").as[String], kind.name)
+      assertEquals((template.json \ "broker").as[String], kind.name)
       assertEquals((template.json \ "settings").as[JsObject], BrokerSettings.template(kind).json)
       val created  = post(template.json)
       assert(created.status < 300, s"${kind.name}: ${created.status} ${created.body}")
@@ -68,6 +68,26 @@ class ConnectionsApiSuite extends munit.FunSuite {
     val res     = put(id, body("redis", Json.obj("uri" -> "http://nope"), id))
     assertEquals(res.status, 400, res.body)
     assertEquals((get(id).json \ "settings" \ "uri").as[String], "redis://127.0.0.1:1")
+    Gateway.deleteConnection(id)
+  }
+
+  // otoroshi writes the kind of the resource in `kind` on what it serves: the broker must not be lost
+  // there, and what the backoffice read must be writable again as it is
+  test("a connection read from the api says its broker, and can be written back as it was read") {
+    val id      = s"connection_${UUID.randomUUID()}"
+    val created = post(body("redis", Json.obj("uri" -> "redis://127.0.0.1:1"), id))
+    assert(created.status < 300, created.body)
+    val read    = get(id).json.as[JsObject]
+    assertEquals((read \ "broker").as[String], "redis")
+    eventually("its status says its broker")((Gateway.connectionStatus(id).json \ "broker").asOpt[String].contains("redis"))
+    val written = put(id, read ++ Json.obj("name" -> "renamed"))
+    assert(written.status < 300, written.body)
+    assertEquals((get(id).json \ "broker").as[String], "redis")
+    assertEquals((get(id).json \ "name").as[String], "renamed")
+    // written before as `kind`
+    val legacy  = put(id, body("pulsar", Json.obj("service_url" -> "pulsar://127.0.0.1:1"), id) - "broker" ++ Json.obj("kind" -> "pulsar"))
+    assert(legacy.status < 300, legacy.body)
+    assertEquals((get(id).json \ "broker").as[String], "pulsar")
     Gateway.deleteConnection(id)
   }
 

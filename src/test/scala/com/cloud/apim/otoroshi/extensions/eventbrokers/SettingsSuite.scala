@@ -224,8 +224,12 @@ class SettingsSuite extends munit.FunSuite {
   test("the admin api refuses an unknown kind, and settings that do not fit the kind") {
     val valid = connection(Redis, Json.obj("uri" -> "redis://r"))
     assertEquals(EventBrokerConnection.validate(valid, valid.json), Right(valid))
-    assertEquals(EventBrokerConnection.validate(valid, valid.json.as[JsObject] - "kind"), Left(Seq("kind: required")))
-    assert(EventBrokerConnection.validate(valid, valid.json.as[JsObject] ++ Json.obj("kind" -> "nats")).left.exists(_.head.startsWith("kind: must be one of")))
+    assertEquals(EventBrokerConnection.validate(valid, valid.json.as[JsObject] - "broker"), Left(Seq("broker: required")))
+    assert(EventBrokerConnection.validate(valid, valid.json.as[JsObject] ++ Json.obj("broker" -> "nats")).left.exists(_.head.startsWith("broker: must be one of")))
+    // what otoroshi's api writes in `kind` is not a broker; a broker named in `kind` (before) still is
+    val served = valid.json.as[JsObject] ++ Json.obj("kind" -> "event-brokers.extensions.cloud-apim.com/EventBrokerConnection")
+    assert(EventBrokerConnection.validate(valid, served).isRight)
+    assertEquals(EventBrokerConnection.format.reads(served - "broker" ++ Json.obj("kind" -> "redis")).get.kind, Redis)
     val invalid = connection(Redis, Json.obj("uris" -> Json.arr("redis://r")))
     assertEquals(EventBrokerConnection.validate(invalid, invalid.json).left.map(_.toSet), Left(Set("settings.uri: required", "settings.uris: unknown field")))
   }
