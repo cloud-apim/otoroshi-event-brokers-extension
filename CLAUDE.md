@@ -116,7 +116,8 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
   When you fix one, remove the marker (and its comment). Check a `.fail` test fails for the reason its
   comment gives, not because of the harness.
 - `it/TlsSuite` runs every broker with mutual tls (`TlsBrokers`), with a ca and certificates made by `Pki`
-  and created in the store through the admin api.
+  and created in the store through the admin api. `it/AuthSuite` does the same for authentication
+  (`AuthBrokers`: kafka scram and plain, pulsar jwt tokens, redis acl, mosquitto password file).
 - `build.sbt` needs `Test / classLoaderLayeringStrategy := Flat` (classpath scanning) and the netty /
   play-json `dependencyOverrides` (Otoroshi's own overrides don't travel through its pom). Logs go
   through `src/test/resources/logback-test.xml`, forced with `logger.resource` because Play otherwise

@@ -53,8 +53,8 @@ Taken on 2026-10-22, not to be discussed again:
   groups, selectors, duplicate detection, delayed delivery ([#10](https://github.com/cloud-apim/otoroshi-event-brokers-extension/pull/10))
 - [x] TLS for every broker, with the certificates of the Otoroshi store, tested with real certificates
   (mutual TLS) against each broker: Kafka (inline PEM, no files), RabbitMQ, Pulsar, Redis, MQTT, Artemis
-- [ ] Authentication tested on every broker: Kafka SASL SCRAM (and PLAIN), Pulsar tokens, users and passwords
-  of RabbitMQ, Redis (ACL), MQTT and Artemis
+- [x] Authentication tested on every broker: Kafka SASL SCRAM (and PLAIN), Pulsar tokens, users and passwords
+  of RabbitMQ, Redis (ACL), MQTT and Artemis; the Kafka JAAS configuration is built from the mechanism
 - [ ] Extras:
   - [ ] Pulsar: SSE resume by message id
   - [ ] RabbitMQ: declarative topology (exchanges, queues, bindings), RabbitMQ streams

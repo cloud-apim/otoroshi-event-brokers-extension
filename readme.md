@@ -489,6 +489,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.RedisStreamsSuite`, `it.MqttSuite`, `it.ArtemisSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
 | `it.TlsSuite`                            | mutual TLS against every broker, with a test CA and certificates created in the Otoroshi store | docker  |
+| `it.AuthSuite`                           | authentication against every broker: Kafka SASL SCRAM and PLAIN, Pulsar tokens, Redis ACL users, MQTT and RabbitMQ passwords | docker  |
 | `it.MqttReconnectSuite`                  | the mqtt client alone, against a mosquitto restarted on the same port | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip
