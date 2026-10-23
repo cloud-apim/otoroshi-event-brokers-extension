@@ -110,7 +110,7 @@ class IngesterConsumerWebsocket extends NgWebsocketBackendPlugin {
           case Left(error) => Future.successful(Left(PluginUtils.badRequest(error)))
           case Right(format) =>
             val kind = lease.client.config.kind
-            PluginUtils.subscribe(lease.client, optsOut).map(_.map { received =>
+            PluginUtils.subscribe(lease.client, optsOut, route = Some(ctx.route.id)).map(_.map { received =>
               val frames =
                 if (clientAcks)
                   received.mapAsync(1) { r =>

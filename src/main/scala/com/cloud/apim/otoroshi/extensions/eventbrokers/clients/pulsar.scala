@@ -204,21 +204,21 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
           .subscriptionName(spec.group.getOrElse(s"otoroshi-${UUID.randomUUID()}"))
           .subscriptionType(subscriptionType)
           .subscriptionMode(if (spec.group.isDefined) SubscriptionMode.Durable else SubscriptionMode.NonDurable)
-          .subscriptionInitialPosition(if (spec.from == StartFrom.Earliest) SubscriptionInitialPosition.Earliest else SubscriptionInitialPosition.Latest)
+          .subscriptionInitialPosition(if (spec.from.fromEarliest) SubscriptionInitialPosition.Earliest else SubscriptionInitialPosition.Latest)
           .receiverQueueSize(100)
           .subscribeAsync()
           .asScala
           .flatMap { consumer =>
             val resumed    = spec.from match {
-              case StartFrom.Positions(positions) => Try(positions.view.mapValues(b64 => MessageId.fromByteArray(Base64.getDecoder.decode(b64))).toMap)
+              case StartFrom.Positions(positions, _) => Try(positions.view.mapValues(b64 => MessageId.fromByteArray(Base64.getDecoder.decode(b64))).toMap)
               case _                              => scala.util.Success(Map.empty[String, MessageId])
             }
             val positioned = (spec.from, resumed) match {
               case (_, scala.util.Failure(_))                 => Future.failed(new IllegalArgumentException("the positions to resume from are not pulsar message ids"))
               case (StartFrom.Timestamp(time), _)             => consumer.seekAsync(time).asScala
               // each topic (each partition) where the client stopped, the others from now on
-              case (StartFrom.Positions(_), scala.util.Success(ids)) =>
-                consumer.seekAsync((topic: String) => ids.getOrElse(topic, MessageId.latest): Object).asScala
+              case (StartFrom.Positions(_, otherwise), scala.util.Success(ids)) =>
+                consumer.seekAsync((topic: String) => ids.getOrElse(topic, if (otherwise.fromEarliest) MessageId.earliest else MessageId.latest): Object).asScala
               case (StartFrom.Offset(_), _)                   =>
                 Future.failed(new IllegalArgumentException("pulsar subscriptions start from earliest, latest or a timestamp"))
               case _                                          => Future.unit

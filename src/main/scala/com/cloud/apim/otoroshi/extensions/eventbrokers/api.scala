@@ -6,6 +6,7 @@ import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConne
 import otoroshi.env.Env
 import play.api.libs.json.{JsObject, JsValue, Json}
 
+import scala.annotation.unused
 import scala.concurrent.duration.*
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -46,6 +47,13 @@ trait EventBrokerClient {
   def close()(using env: Env, ec: ExecutionContext): Future[Unit]
 
   def capabilities: BrokerCapabilities
+
+  /**
+   * how far behind a group is, where the broker tells it (kafka, redis streams): none elsewhere.
+   * `topics`: the ones to look at, all the group reads when empty
+   */
+  def lag(@unused group: String, @unused topics: Seq[String])(using @unused env: Env, @unused ec: ExecutionContext): Future[Option[JsObject]] =
+    Future.successful(None)
 
   /**
    * publishes the events, in order, and answers once the broker has taken them (or refused them):
@@ -148,9 +156,18 @@ enum StartFrom {
   case Offset(offset: Long)
   /**
    * right after these positions, what a client resuming gives back. what a position is depends on the
-   * broker: `topic:partition` -> offset on kafka, stream -> entry id on redis streams
+   * broker: `topic:partition` -> offset on kafka, stream -> entry id on redis streams. what they do not
+   * name (a partition the client got nothing from yet) starts where `otherwise` says: where the call
+   * asked to start
    */
-  case Positions(positions: Map[String, String])
+  case Positions(positions: Map[String, String], otherwise: StartFrom = StartFrom.Latest)
+
+  /** from the beginning, or from a position and the beginning for what it does not name */
+  def fromEarliest: Boolean = this match {
+    case Earliest                => true
+    case Positions(_, otherwise) => otherwise.fromEarliest
+    case _                       => false
+  }
 }
 
 /** what to subscribe to. topics are topics, queues or channels, as the broker calls them */

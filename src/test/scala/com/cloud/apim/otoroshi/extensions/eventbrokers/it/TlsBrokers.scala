@@ -104,7 +104,7 @@ object TlsBrokers {
           "params.trustStorePassword" -> Pki.Password,
           "params.trustStoreType"     -> "PKCS12",
           "params.needClientAuth"     -> "true"
-        ).map((k, v) => s"acceptorConfigurations.tls.$k=$v").mkString("\n")
+        ).map((k, v) => s"acceptorConfigurations.tls.$k=$v").mkString("\n") + "\nmaxDiskUsage=-1\n"
       ),
       "/var/lib/artemis-instance/etc-override/broker.properties"
     )

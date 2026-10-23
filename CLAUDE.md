@@ -62,6 +62,10 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **tryout.scala** - `ConnectionTryout`: the `_publish` and `_peek` admin routes of a connection
 - **integrations.scala** - what the data exporter (`plugins/exporter.scala`) and the workflow functions
   (`EventBrokersWorkflows`, registered in `start`) share: publish and consume through a lease
+- **traffic.scala** - `Traffic`: the counters of each connection and route of the node (published,
+  failed, consumed, acked, open subscriptions, publish latency), fed by `PluginUtils.publishAll` /
+  `subscribe` (`watch`, `publishing`) and sent to otoroshi's metrics. `EventBrokerClient.lag` is
+  implemented by kafka and redis streams
 - **replies.scala** - `ReplyListeners`: one reply subscription per connection and destination on each
   node, for the request reply plugin (`plugins/reply.scala`)
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and

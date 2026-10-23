@@ -2,7 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.clients
 
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, KafkaSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.*
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, DescribeClusterOptions}
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, DescribeClusterOptions, OffsetSpec}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
 import org.apache.kafka.clients.producer.{Callback, Producer, ProducerConfig, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
@@ -119,6 +119,20 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
   private def admin: Admin = adminRef.get().getOrElse(throw new IllegalStateException("the kafka client is not started"))
 
   override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = true, replay = true, keys = true, headers = true)
+
+  /** the committed offsets of the group against the end of each partition */
+  override def lag(group: String, topics: Seq[String])(using env: Env, ec: ExecutionContext): Future[Option[JsObject]] = Future {
+    val committed  = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS).asScala.toMap
+      .collect { case (tp, offset) if offset != null && (topics.isEmpty || topics.contains(tp.topic())) => tp -> offset.offset() }
+    val ends       =
+      if (committed.isEmpty) Map.empty[TopicPartition, Long]
+      else admin.listOffsets(committed.keys.map(tp => tp -> OffsetSpec.latest()).toMap.asJava).all().get(10, TimeUnit.SECONDS).asScala.toMap.view.mapValues(_.offset()).toMap
+    val partitions = committed.toSeq.sortBy((tp, _) => (tp.topic(), tp.partition())).map { (tp, offset) =>
+      val end = ends.getOrElse(tp, offset)
+      Json.obj("topic" -> tp.topic(), "partition" -> tp.partition(), "committed" -> offset, "end" -> end, "lag" -> math.max(0L, end - offset))
+    }
+    Some(Json.obj("group" -> group, "lag" -> partitions.map(p => (p \ "lag").as[Long]).sum, "partitions" -> partitions))
+  }(using io)
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
     rememberIo(ec)
@@ -252,14 +266,14 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
     val groupId  = spec.group.getOrElse(s"otoroshi-${UUID.randomUUID()}")
     val local    = consumerSettings
       .withGroupId(groupId)
-      .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, if (spec.from == StartFrom.Earliest) "earliest" else "latest")
+      .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, if (spec.from.fromEarliest) "earliest" else "latest")
       // at most once in a group: committed as read. otherwise only what is acked is committed
       .withProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, (spec.group.isDefined && spec.delivery == DeliveryMode.AtMostOnce).toString)
       .applyOnWithOpt(spec.options.select("client_id").asOpt[String])((s, id) => s.withClientId(id))
       .applyOnWithOpt(spec.options.select("group_instance_id").asOpt[String])((s, id) => s.withGroupInstanceId(id))
     val events: Future[Source[ReceivedEvent, ?]] = spec.from match {
-      // resuming: right after the positions given, the partitions they do not name from now on
-      case StartFrom.Positions(positions) =>
+      // resuming: right after the positions given, the partitions they do not name where the call starts
+      case StartFrom.Positions(positions, _) =>
         val resumeAt = (assigned: Set[TopicPartition]) =>
           Future.successful(assigned.flatMap(tp => positions.get(s"${tp.topic()}:${tp.partition()}").flatMap(_.toLongOption).map(offset => tp -> (offset + 1L))).toMap)
         val all      = Subscriptions.topics(topics.toSet)

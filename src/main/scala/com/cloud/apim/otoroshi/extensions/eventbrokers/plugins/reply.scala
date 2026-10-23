@@ -92,7 +92,7 @@ class HttpEventsRequestReply extends NgBackendCall {
                           // a broker that replays reads the replies from before they could be read
                           val ready         = if (ReplyListener.fromDate(lease.client)) Future.unit else listener.whenReady(timeout)
                           val published     = ready.flatMap { _ =>
-                            lease.releasing(PluginUtils.publishAll(lease.client, Source.single(Right(Outgoing(request, routing))), opts).runWith(Sink.head))
+                            lease.releasing(PluginUtils.publishAll(lease.client, Source.single(Right(Outgoing(request, routing))), opts, Some(ctx.route.id)).runWith(Sink.head))
                           }
                           published.flatMap { result =>
                             if (!(result \ "published").asOpt[Boolean].contains(true)) {

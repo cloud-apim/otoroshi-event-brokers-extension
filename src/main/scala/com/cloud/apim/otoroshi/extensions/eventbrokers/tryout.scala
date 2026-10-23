@@ -96,4 +96,22 @@ object ConnectionTryout {
         )
     }
   }
+
+  /** how far behind a group is: `group` (required), `topic` or `topics` (comma separated) */
+  def lag(connections: ConnectionManager, id: String, request: RequestHeader)(using env: Env, ec: ExecutionContext): Future[Result] =
+    request.getQueryString("group").filter(_.trim.nonEmpty) match {
+      case None        => Future.successful(bad("group is required"))
+      case Some(group) =>
+        val topics = (request.getQueryString("topics").toSeq.flatMap(_.split(",")) ++ request.getQueryString("topic")).map(_.trim).filter(_.nonEmpty)
+        connections.acquire(id) match {
+          case Left(why)    => unavailable(why)
+          case Right(lease) =>
+            lease.releasing(
+              lease.client.lag(group, topics).map {
+                case Some(lag) => Results.Ok(lag)
+                case None      => Results.NotImplemented(Json.obj("error" -> "not_supported", "error_description" -> s"${lease.client.config.kind.label} does not tell how far behind a group is"))
+              }.recover { case NonFatal(e) => Results.BadGateway(Json.obj("error" -> "lag_error", "error_description" -> ConnectionManager.describe(e))) }
+            )
+        }
+    }
 }

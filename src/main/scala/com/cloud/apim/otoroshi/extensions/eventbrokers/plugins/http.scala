@@ -55,7 +55,7 @@ class HttpEventsIngester extends NgBackendCall {
               // where an event says it goes is under the same rules as the options of the caller
               val allowed = events.map(_.flatMap(o => CallOptions.check(config, o.routing).toLeft(o)))
               // one json line per event, in order
-              val results = PluginUtils.publishAll(lease.client, allowed, opts).map(result => s"${result.stringify}\n".byteString)
+              val results = PluginUtils.publishAll(lease.client, allowed, opts, Some(ctx.route.id)).map(result => s"${result.stringify}\n".byteString)
               Right(BackendCallResponse(NgPluginHttpResponse.fromResult(Results.Ok.chunked(lease.releasing(results)).as("application/x-ndjson")), None))
           }
         }
@@ -100,7 +100,7 @@ class HttpEventsConsumer extends NgBackendCall {
               lease.release()
               Left(PluginUtils.badRequest(error)).vfuture
             case Right(format) =>
-              PluginUtils.subscribe(lease.client, opts).map {
+              PluginUtils.subscribe(lease.client, opts, route = Some(ctx.route.id)).map {
                 case Left(error) =>
                   lease.release()
                   Left(error)

@@ -51,7 +51,7 @@ final class ReplyListener(connection: String, options: JsObject, env: Env, conne
               .map { events =>
                 ready.trySuccess(())
                 lease
-                  .releasing(events.map { received =>
+                  .releasing(Traffic.of(env).map(_.watch(client, None)(events)).getOrElse(events).map { received =>
                     val event = CloudEventBindings.fromMessage(received.message, client.config.kind)
                     correlation(received, event).flatMap(pending.remove).foreach(_.trySuccess(event))
                   })

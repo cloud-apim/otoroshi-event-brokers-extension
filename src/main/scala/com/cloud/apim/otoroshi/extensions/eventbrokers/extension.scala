@@ -2,7 +2,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import org.apache.pekko.stream.scaladsl.StreamConverters
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings, ConnectionTryout, EventBrokersWorkflows, ReplyListeners, WebhookLocks, WebhookManager, WebhookManagerSettings}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings, ConnectionTryout, EventBrokersWorkflows, ReplyListeners, Traffic, WebhookLocks, WebhookManager, WebhookManagerSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities._
 import otoroshi.env.Env
 import otoroshi.models._
@@ -65,6 +65,9 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
     new WebhookManager(env, settings, connections, node => WebhookLocks(env, settings, node))
   }
 
+  /** what goes through the connections and the routes of this node */
+  lazy val traffic: Traffic = new Traffic(env)
+
   /** the replies this node waits for, for the request reply plugin */
   lazy val replies: ReplyListeners = new ReplyListeners(env, connections)
 
@@ -88,7 +91,23 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
       "/api/extensions/cloud-apim/event-brokers/connections/_status",
       false,
       (_, _, _, _) => {
-        Results.Ok(Json.obj("node" -> nodeJson, "connections" -> JsArray(connections.statusesJson()))).vfuture
+        Results.Ok(Json.obj("node" -> nodeJson, "connections" -> JsArray(connections.statusesJson().map(withTraffic)))).vfuture
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/_traffic",
+      false,
+      (_, _, _, _) => Results.Ok(traffic.json ++ Json.obj("node" -> nodeJson)).vfuture
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/connections/:id/_lag",
+      false,
+      (ctx, request, _, _) => {
+        given ExecutionContext = env.otoroshiExecutionContext
+        given Env              = env
+        ConnectionTryout.lag(connections, ctx.named("id").getOrElse(""), request)
       }
     ),
     AdminExtensionAdminApiRoute(
@@ -138,7 +157,7 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
       false,
       (ctx, _, _, _) => {
         ctx.named("id").flatMap(connections.statusJson) match {
-          case Some(status) => Results.Ok(status ++ Json.obj("node" -> nodeJson)).vfuture
+          case Some(status) => Results.Ok(withTraffic(status) ++ Json.obj("node" -> nodeJson)).vfuture
           case None         => Results.NotFound(Json.obj("error" -> "not_found", "error_description" -> "no such connection")).vfuture
         }
       }
@@ -146,6 +165,9 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
   )
 
   private def nodeJson: JsObject = Json.obj("cluster_mode" -> env.clusterConfig.mode.name)
+
+  private def withTraffic(status: JsObject): JsObject =
+    (status \ "id").asOpt[String].map(id => status ++ Json.obj("traffic" -> traffic.connectionJson(id))).getOrElse(status)
 
   override def frontendExtensions(): Seq[AdminExtensionFrontendExtension] = Seq(
     AdminExtensionFrontendExtension(

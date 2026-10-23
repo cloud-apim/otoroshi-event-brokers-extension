@@ -74,6 +74,11 @@ object Brokers {
   /** the default user of the image: artemis / artemis */
   lazy val artemis: Container = {
     val container = new Container("apache/artemis:2.55.0-alpine")
+    // a full disk (a docker vm short of space) must not block the producers of the tests
+    container.withCopyToContainer(
+      org.testcontainers.images.builder.Transferable.of("maxDiskUsage=-1\n".getBytes("UTF-8"), 0x1a4),
+      "/var/lib/artemis-instance/etc-override/broker.properties"
+    )
     container.withExposedPorts(61616)
     container.waitingFor(Wait.forLogMessage(".*AMQ221007.*", 1))
     container.start()

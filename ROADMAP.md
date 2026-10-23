@@ -79,8 +79,9 @@ Taken on 2026-10-22, not to be discussed again:
   (`EventBrokerConnectionUnavailableAlert`) ([#3](https://github.com/cloud-apim/otoroshi-event-brokers-extension/pull/3))
 - [x] Connections per state as metrics, status api, status badges in the backoffice
   ([#3](https://github.com/cloud-apim/otoroshi-event-brokers-extension/pull/3))
-- [ ] Metrics per connection and route: published, failed, consumed, acked, latencies
-- [ ] Open subscriptions, and consumer lag where the broker tells it (Kafka, Redis streams)
+- [x] Metrics per connection and route: published, failed, consumed, acked, publish latency (in the status api,
+  the backoffice list and otoroshi's metrics)
+- [x] Open subscriptions, and consumer lag where the broker tells it (Kafka, Redis streams)
 
 ## Phase 5: documentation
 

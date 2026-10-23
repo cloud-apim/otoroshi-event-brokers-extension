@@ -54,7 +54,7 @@ class SseEventConsumer extends NgBackendCall {
               lease.release()
               Left(PluginUtils.badRequest(error)).vfuture
             case Right(format) =>
-              PluginUtils.subscribe(lease.client, opts, SseIds.resume(kind, lastEventId)).map {
+              PluginUtils.subscribe(lease.client, opts, SseIds.resume(kind, lastEventId), Some(ctx.route.id)).map {
                 case Left(error) =>
                   lease.release()
                   Left(error)

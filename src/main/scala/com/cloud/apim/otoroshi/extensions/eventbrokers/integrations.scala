@@ -55,7 +55,8 @@ object Integrations {
           if (!raw) PluginUtils.publishAll(lease.client, Source(events.toList).map(e => Right(Outgoing(e))), options).runWith(Sink.seq)
           else {
             val messages = events.map(e => BrokerMessage(key = e.extension("partitionkey").map(ByteString(_)), data = e.data.getOrElse(ByteString.empty)))
-            Future.fromTry(Try(lease.client.publish(messages, options))).flatten.map(_.zip(events).map((r, e) => r.json ++ Json.obj("id" -> e.id)))
+            val batch    = Future.fromTry(Try(lease.client.publish(messages, options))).flatten
+            Traffic.of(env).map(_.publishing(lease.client, None)(batch)).getOrElse(batch).map(_.zip(events).map((r, e) => r.json ++ Json.obj("id" -> e.id)))
           }
         lease.releasing(published).map(Right(_)).recover { case NonFatal(e) => Left(ConnectionManager.describe(e)) }
     }

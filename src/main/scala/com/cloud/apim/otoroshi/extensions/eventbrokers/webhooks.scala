@@ -334,7 +334,7 @@ final class WebhookRunner(val webhook: EventBrokerWebhook, env: Env, connections
                   .flatten
                   .map { events =>
                     lease.releasing(
-                      events.mapAsync(webhook.maxInFlight) { received =>
+                      Traffic.of(env).map(_.watch(client, None)(events)).getOrElse(events).mapAsync(webhook.maxInFlight) { received =>
                         deliver(CloudEventBindings.fromMessage(received.message, client.config.kind)).flatMap(_ => received.ack())
                       }
                     )

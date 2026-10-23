@@ -335,9 +335,46 @@ The first two carry the `connection` (`id`, `name`, `kind`), the `previous_state
 one alert per outage, not one per attempt. The webhook alert carries the `webhook`, the `event` (`id`,
 `source`, `type`), the `attempts` and the `reason`.
 
-Metrics, when Otoroshi's metrics are enabled: `cloud-apim.event-brokers.connections.<state>` (how many
-connections of the node are in each state) and `cloud-apim.event-brokers.connections.transitions.<state>`;
-`cloud-apim.event-brokers.webhooks.<id>.delivered`, `.retried`, `.failed`, `.dead_lettered`.
+**Traffic**: every node counts what goes through its connections and its routes, since it started,
+in the status of each connection, in the backoffice list, and in the admin API:
+
+```bash
+curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/_traffic -u ...
+```
+
+```json
+{
+  "connections": { "connection_...": { "published": 1204, "publish_failed": 2, "consumed": 980, "acked": 980, "subscriptions": 3, "publish_ms": { "mean": 4.2, "max": 87 } } },
+  "routes": { "route_...": { "published": 1204, "publish_failed": 2, "consumed": 0, "acked": 0, "subscriptions": 0, "publish_ms": { "mean": 4.2, "max": 87 } } }
+}
+```
+
+`subscriptions` are the ones open now; `publish_ms` is how long the broker took to take a batch of
+events. Webhooks, the exporter, the workflow functions and request reply count on their connection.
+
+**How far behind a group is**, where the broker tells it (Kafka: the committed offsets against the end of
+each partition; Redis streams: `XINFO GROUPS`, its `lag` and what is pending; a `501` elsewhere):
+
+```bash
+curl 'http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/connections/<id>/_lag?group=billing&topic=orders' -u ...
+```
+
+```json
+{ "group": "billing", "lag": 3, "partitions": [{ "topic": "orders", "partition": 0, "committed": 2, "end": 5, "lag": 3 }] }
+```
+
+A webhook reads in the group `otoroshi-webhook-<id>`: its lag says how far behind its deliveries are.
+
+**Metrics**, when Otoroshi's metrics are enabled (Prometheus included):
+
+| Metric | |
+|---|---|
+| `cloud-apim.event-brokers.connections.<state>` | how many connections of the node are in each state |
+| `cloud-apim.event-brokers.connections.transitions.<state>` | how many times a connection went into a state |
+| `cloud-apim.event-brokers.connections.<id>.published`, `.publish_failed`, `.consumed`, `.acked` | the traffic of a connection |
+| `cloud-apim.event-brokers.connections.<id>.publish` (timer), `.subscriptions` (gauge) | how long publishing takes, what is open |
+| `cloud-apim.event-brokers.routes.<id>.*` | the same, for a route |
+| `cloud-apim.event-brokers.webhooks.<id>.delivered`, `.retried`, `.failed`, `.dead_lettered` | the deliveries of a webhook |
 
 ## Requirements
 
@@ -624,6 +661,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `it.AuthSuite`                           | authentication against every broker: Kafka SASL SCRAM and PLAIN, Pulsar tokens, Redis ACL users, MQTT and RabbitMQ passwords | docker  |
 | `it.WebhookSuite`                        | webhooks against an HTTP endpoint in the test jvm: modes, signature, retries, dead letters, alerts, two nodes sharing their locks in Redis | docker  |
 | `it.TryoutSuite`, `it.IntegrationsSuite` | the publish and peek admin routes, the data exporter, the workflow functions, request reply | docker  |
+| `it.ObservabilitySuite`                  | the traffic counters of the connections and the routes, the metrics, the lag of Kafka and Redis streams groups | docker  |
 | `it.MqttReconnectSuite`                  | the mqtt client alone, against a mosquitto restarted on the same port | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip

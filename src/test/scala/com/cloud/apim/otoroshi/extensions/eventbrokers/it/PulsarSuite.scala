@@ -144,7 +144,8 @@ class PulsarSuite extends BrokerSuite {
     assert(res.status < 300, res.body)
     (0 until 9).foreach(n => publish(topic, n, run))
     val first = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic, "from" -> "earliest", "take" -> 4)).filter(_.id.isDefined), take = 4))
-    val rest  = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 5, within = 15.seconds))
+    // the same url, as EventSource does: a partition it got nothing from yet starts from the earliest too
+    val rest  = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic, "from" -> "earliest"), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 5, within = 15.seconds))
     // every message once, wherever it was
     assertEquals((numbers(first.map(e => Json.parse(e.data))) ++ numbers(rest.map(e => Json.parse(e.data)))).sorted, (0 until 9).toSeq)
   }

@@ -233,11 +233,15 @@ object PluginUtils {
    * opens the subscription the call asks for, or says why it cannot: 400 for the call, 502 for the
    * broker. `resume`: where a client coming back stopped, wins over what the options say
    */
-  def subscribe(client: EventBrokerClient, opts: JsObject, resume: Option[StartFrom] = None)(using
+  def subscribe(client: EventBrokerClient, opts: JsObject, resume: Option[StartFrom] = None, route: Option[String] = None)(using
       env: Env,
       ec: ExecutionContext
   ): Future[Either[NgProxyEngineError, Source[ReceivedEvent, ?]]] =
-    subscriptionSpec(opts).map(spec => resume.map(from => spec.copy(from = from)).getOrElse(spec)) match {
+    // resuming: the positions of the client, and where the call starts for what they do not name
+    subscriptionSpec(opts).map(spec => resume.map {
+      case StartFrom.Positions(positions, _) => spec.copy(from = StartFrom.Positions(positions, spec.from))
+      case from                              => spec.copy(from = from)
+    }.getOrElse(spec)) match {
       case Left(error) => Future.successful(Left(badRequest(error)))
       case Right(spec) =>
         client.capabilities.refuse(spec, client.config.kind.label) match {
@@ -246,7 +250,7 @@ object PluginUtils {
             Future
               .fromTry(Try(client.subscribe(spec)))
               .flatten
-              .map(source => Right(source): Either[NgProxyEngineError, Source[ReceivedEvent, ?]])
+              .map(source => Right(Traffic.of(env).map(_.watch(client, route)(source)).getOrElse(source)): Either[NgProxyEngineError, Source[ReceivedEvent, ?]])
               .recover { case NonFatal(e) => Left(consumeError(e)) }
         }
     }
@@ -272,7 +276,7 @@ object PluginUtils {
    * in order, with the id of the event. an invalid event, or a broker failing, gives failed results,
    * not a broken stream
    */
-  def publishAll(client: EventBrokerClient, events: Source[Either[String, Outgoing], ?], opts: JsObject)(using
+  def publishAll(client: EventBrokerClient, events: Source[Either[String, Outgoing], ?], opts: JsObject, route: Option[String] = None)(using
       env: Env,
       ec: ExecutionContext
   ): Source[JsObject, ?] =
@@ -283,7 +287,10 @@ object PluginUtils {
         val messages  = valid.map(o => CloudEventBindings.toMessage(o.event, client.config.kind, o.routing, client.capabilities.headers))
         val published =
           if (messages.isEmpty) Future.successful(Seq.empty[PublishResult])
-          else Future.fromTry(Try(client.publish(messages, opts))).flatten.recover { case NonFatal(e) => messages.map(_ => PublishResult.failed(e)) }
+          else {
+            val batch = Future.fromTry(Try(client.publish(messages, opts))).flatten.recover { case NonFatal(e) => messages.map(_ => PublishResult.failed(e)) }
+            Traffic.of(env).map(_.publishing(client, route)(batch)).getOrElse(batch)
+          }
         published.map { results =>
           val byEvent = valid.zip(results).iterator
           batch.map {

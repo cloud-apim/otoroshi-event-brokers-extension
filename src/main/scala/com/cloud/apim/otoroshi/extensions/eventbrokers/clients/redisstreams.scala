@@ -54,6 +54,40 @@ class RedisStreamsBrokerClient(val config: EventBrokerConnection, settings: Redi
 
   override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = true, replay = true, keys = false, headers = true)
 
+  private def text(value: Any): String = value match {
+    case b: ByteString  => b.utf8String
+    case b: Array[Byte] => new String(b, "UTF-8")
+    case other          => String.valueOf(other)
+  }
+
+  /** what XINFO GROUPS says of the group, stream by stream: its lag (redis 7), what is pending, the last entry delivered */
+  override def lag(group: String, topics: Seq[String])(using env: Env, ec: ExecutionContext): Future[Option[JsObject]] = {
+    val names = if (topics.isEmpty) streams.defaultStream.toSeq else topics
+    Future
+      .sequence(names.map { stream =>
+        connection.async().xinfoGroups(stream).asScala.map { groups =>
+          val found = groups.asScala.toSeq.collect { case fields: java.util.List[?] =>
+            fields.asScala.toSeq.grouped(2).collect { case Seq(k, v) => text(k) -> v }.toMap
+          }.find(fields => fields.get("name").map(text).contains(group))
+          found.map { fields =>
+            def long(key: String): Option[Long] = fields.get(key).flatMap(v => Option(v)).flatMap(v => text(v).toLongOption)
+            Json.obj(
+              "stream"            -> stream,
+              "lag"               -> long("lag"),
+              "pending"           -> long("pending"),
+              "consumers"         -> long("consumers"),
+              "last_delivered_id" -> fields.get("last-delivered-id").map(text),
+              "entries_read"      -> long("entries-read")
+            )
+          }
+        }
+      })
+      .map { found =>
+        val streams = found.flatten
+        Some(Json.obj("group" -> group, "lag" -> streams.flatMap(s => (s \ "lag").asOpt[Long]).sum, "streams" -> streams))
+      }
+  }
+
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
     connectionRef.set(Some(startClient().connect(new ByteStringRedisCodec())))
   }
@@ -132,7 +166,7 @@ class RedisStreamsBrokerClient(val config: EventBrokerConnection, settings: Redi
   private def startOf(spec: SubscriptionSpec, stream: String): Either[String, Option[String]] = {
     val fromId = spec.options.select("from_id").asOpt[String].map(_.trim).filter(_.nonEmpty)
     (spec.from, fromId) match {
-      case (StartFrom.Positions(positions), _) => Right(positions.get(stream))
+      case (StartFrom.Positions(positions, otherwise), _) => Right(positions.get(stream).orElse(Option.when(otherwise.fromEarliest)("0-0")))
       case (_, Some(id))                       => before(id).map(Some(_))
       case (StartFrom.Earliest, _)             => Right(Some("0-0"))
       case (StartFrom.Timestamp(millis), _)    => before(millis.toString).map(Some(_))

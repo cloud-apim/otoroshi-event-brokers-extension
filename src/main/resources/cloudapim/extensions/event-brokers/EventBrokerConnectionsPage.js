@@ -267,6 +267,17 @@ class EventBrokerConnectionsPage extends Component {
       notSortable: true,
       content: (item) => connectionStatusBadge(item._status),
     },
+    {
+      title: 'Traffic',
+      notFilterable: true,
+      notSortable: true,
+      // on the node serving the backoffice, since it started
+      content: (item) => {
+        const traffic = (item._status || {}).traffic;
+        if (!traffic) return '';
+        return `${traffic.published} out, ${traffic.consumed} in${traffic.publish_failed ? `, ${traffic.publish_failed} failed` : ''}${traffic.subscriptions ? `, ${traffic.subscriptions} open` : ''}`;
+      },
+    },
   ];
 
   // as seen by the node serving the backoffice: every node has its own clients

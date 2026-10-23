@@ -286,8 +286,8 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
         case StartFrom.Earliest             => Some("first")
         case StartFrom.Timestamp(millis)    => Some(new Date(millis))
         case StartFrom.Offset(offset)       => Some(java.lang.Long.valueOf(offset))
-        case StartFrom.Positions(positions) =>
-          Some(positions.get(queue).flatMap(_.toLongOption).map(last => java.lang.Long.valueOf(last + 1)).getOrElse("next"))
+        case StartFrom.Positions(positions, otherwise) =>
+          Some(positions.get(queue).flatMap(_.toLongOption).map(last => java.lang.Long.valueOf(last + 1)).getOrElse(if (otherwise.fromEarliest) "first" else "next"))
       }
       given Materializer = env.otoroshiMaterializer
       // never more than `prefetch` unacked messages are delivered: the buffer does not overflow
