@@ -5,7 +5,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OTOROSHI="${OTOROSHI_HOME:-$HERE/../otoroshi/otoroshi}"
-JAR="$HERE/target/scala-3.8.4/otoroshi-extension-event-brokers-assembly_3-dev.jar"
+JAR="$HERE/target/scala-3.8.4/otoroshi-event-brokers-extension-assembly_3-dev.jar"
 LINK="$OTOROSHI/lib/vendor-event-brokers.jar"
 
 (cd "$HERE" && sbt assembly)

@@ -228,12 +228,12 @@ connections of the node are in each state) and `cloud-apim.event-brokers.connect
 
 ## Installation
 
-1. Download `otoroshi-extension-event-brokers_3-<version>.jar` and its `.sha256` from the
-   [releases page](https://github.com/cloud-apim/otoroshi-extension-event-brokers/releases/latest).
+1. Download `otoroshi-event-brokers-extension_3-<version>.jar` and its `.sha256` from the
+   [releases page](https://github.com/cloud-apim/otoroshi-event-brokers-extension/releases/latest).
 2. Start Otoroshi with the jar on its classpath:
 
    ```bash
-   java -cp "./otoroshi-extension-event-brokers.jar:./otoroshi.jar" play.core.server.ProdServerStart
+   java -cp "./otoroshi-event-brokers-extension.jar:./otoroshi.jar" play.core.server.ProdServerStart
    ```
 
    or mount it into the plugins directory of the Otoroshi Docker image (`OTOROSHI_PLUGINS_DIR_PATH`).
@@ -442,7 +442,7 @@ sbt "testOnly *KafkaSuite"    # one broker
 ```bash
 docker compose up -d          # every broker on its default port (kafka on 9093, kafka-ui on 8000)
 sbt test                      # see above
-sbt assembly                  # target/scala-3.8.4/otoroshi-extension-event-brokers-assembly_3-dev.jar
+sbt assembly                  # target/scala-3.8.4/otoroshi-event-brokers-extension-assembly_3-dev.jar
 ./rebuild.sh                  # assembly, linked into a local otoroshi checkout (../otoroshi/otoroshi/lib), reloaded
 ```
 

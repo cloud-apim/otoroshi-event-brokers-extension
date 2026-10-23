@@ -18,7 +18,7 @@ sbt compile
 sbt test                                   # unit + integration suites (sequential)
 sbt "testOnly *KafkaSuite"                 # one suite
 sbt "testOnly *KafkaSuite -- *partition*"  # tests of a suite matching a glob (MUnit filter)
-sbt assembly                               # target/scala-3.8.4/otoroshi-extension-event-brokers-assembly_3-dev.jar
+sbt assembly                               # target/scala-3.8.4/otoroshi-event-brokers-extension-assembly_3-dev.jar
 ./rebuild.sh                               # assembly, linked into ../otoroshi/otoroshi/lib, hot reloaded
 docker compose up -d                       # every broker on its default port, for manual testing
 ```

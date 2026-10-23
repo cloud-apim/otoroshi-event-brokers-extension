@@ -25,7 +25,7 @@ concurrency:
 
 env:
   SCALA_VERSION: 3.8.4
-  NAME: otoroshi-extension-event-brokers
+  NAME: otoroshi-event-brokers-extension
 
 jobs:
   release:

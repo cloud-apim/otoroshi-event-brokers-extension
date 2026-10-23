@@ -1,13 +1,13 @@
-# Contributing to otoroshi-extension-event-brokers
+# Contributing to otoroshi-event-brokers-extension
 
-These guidelines apply to all projects living in the the `cloud-apim/otoroshi-extension-event-brokers` repository.
+These guidelines apply to all projects living in the the `cloud-apim/otoroshi-event-brokers-extension` repository.
 
 These guidelines are meant to be a living document that should be changed and adapted as needed.
 We encourage changes that make it easier to achieve our goals in an efficient way.
 
 ## Codebase
 
-* [src](https://github.com/cloud-apim/otoroshi-extension-event-brokers/src): contains the otoroshi-extension-event-brokers sources and tests
+* [src](https://github.com/cloud-apim/otoroshi-event-brokers-extension/src): contains the otoroshi-event-brokers-extension sources and tests
 
 ## Workflow
 
@@ -15,9 +15,9 @@ The steps below describe how to get a patch into a main development branch (e.g.
 The steps are exactly the same for everyone involved in the project (be it core team, or first time contributor).
 We follow the standard GitHub [fork & pull](https://help.github.com/articles/using-pull-requests/#fork--pull) approach to pull requests. Just fork the official repo, develop in a branch, and submit a PR!
 
-1. To avoid duplicated effort, it might be good to check the [issue tracker](https://github.com/cloud-apim/otoroshi-extension-event-brokers/issues) and [existing pull requests](https://github.com/cloud-apim/otoroshi-extension-event-brokers/pulls) for existing work.
-   - If there is no ticket yet, feel free to [create one](https://github.com/cloud-apim/otoroshi-extension-event-brokers/issues/new) to discuss the problem and the approach you want to take to solve it.
-1. [Fork the project](https://github.com/cloud-apim/otoroshi-extension-event-brokers#fork-destination-box) on GitHub. You'll need to create a feature-branch for your work on your fork, as this way you'll be able to submit a pull request against the mainline otoroshi-extension-event-brokers.
+1. To avoid duplicated effort, it might be good to check the [issue tracker](https://github.com/cloud-apim/otoroshi-event-brokers-extension/issues) and [existing pull requests](https://github.com/cloud-apim/otoroshi-event-brokers-extension/pulls) for existing work.
+   - If there is no ticket yet, feel free to [create one](https://github.com/cloud-apim/otoroshi-event-brokers-extension/issues/new) to discuss the problem and the approach you want to take to solve it.
+1. [Fork the project](https://github.com/cloud-apim/otoroshi-event-brokers-extension#fork-destination-box) on GitHub. You'll need to create a feature-branch for your work on your fork, as this way you'll be able to submit a pull request against the mainline otoroshi-event-brokers-extension.
 1. Create a branch on your fork and work on the feature. For example: `git checkout -b wip-awesome-new-feature`
    - Please make sure to follow the general quality guidelines (specified below) when developing your patch.
    - Please write additional tests covering your feature and adjust existing ones if needed before submitting your pull request. 
@@ -32,7 +32,7 @@ We follow the standard GitHub [fork & pull](https://help.github.com/articles/usi
 
 The TL;DR; of the above very precise workflow version is:
 
-1. Fork otoroshi-extension-event-brokers
+1. Fork otoroshi-event-brokers-extension
 2. Hack and test on your feature (on a branch)
 3. Document it 
 4. Submit a PR
