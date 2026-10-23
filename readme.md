@@ -29,6 +29,8 @@ events, or over a websocket. The brokers stay private, Otoroshi handles who may 
 | Cloud APIM - HTTP events consumer           | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.HttpEventsConsumer`        | streams events as newline-delimited JSON              |
 | Cloud APIM - SSE events consumer            | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.SseEventConsumer`          | streams events as server-sent events                  |
 | Cloud APIM - Websocket Ingester/Consumer    | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.IngesterConsumerWebsocket` | publishes incoming frames, streams events back        |
+| Cloud APIM - Events request reply           | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.HttpEventsRequestReply`    | publishes the request, answers with the event replying to it |
+| Cloud APIM - Event brokers exporter         | `cp:otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.EventBrokersDataExporter`  | a data exporter: otoroshi's events to a connection    |
 
 Every plugin points to an **event broker connection**, and decides what its callers may ask:
 
@@ -54,6 +56,33 @@ Every plugin points to an **event broker connection**, and decides what its call
 - When the caller may name the topic (queue, channel), `allowed_topics` holds the glob patterns it must
   match (`["orders-*"]`); empty, any.
 - Where an event says it goes (the `vendor_metadata` of the legacy format) is held to the same rules.
+
+**Request reply**: the body of the call is published as an event (read the way the ingester reads it)
+with two extensions, `correlationid` (new for each call) and `replyto`; the service answering
+publishes an event with the same `correlationid` where `replyto` says, and its data is the response
+(its `datacontenttype` the content type, a `status` extension the HTTP status, 200 by default). Options:
+`reply_to` (required), `reply_options` (how to read the replies, JSON: `{"topic": <reply_to>}` by
+default; on RabbitMQ, an exchange and a routing key: `{"exchange": "amq.direct", "routing_key": "replies"}`),
+`timeout` (millis, 10000: then a `504`). The request also carries the native fields where the broker
+has them: the AMQP `reply_to` and `correlation_id`, the MQTT 5 response topic. Every node reads the
+replies without a group (each one gets them all) and keeps those of its own requests; on Kafka, Pulsar
+and Redis streams it reads them from when it started listening, so none is missed while it subscribes.
+
+**Data exporter**: in *Data exporters*, a `custom` exporter with the *Event brokers exporter* and its
+configuration, `{"connection": "connection_...", "options": {"topic": "otoroshi-events"}, "format": "cloudevents"}`.
+Each event (analytics, alerts, audit, ...) is a CloudEvent: its `@id` as id, `io.otoroshi.<@type>` as
+type, `/<@product>/<@env>` as source, the alert or the route as subject, the route as `partitionkey`
+(the events of a route stay in order on Kafka), the event as data. `format: raw` publishes the event
+alone, without any attribute.
+
+**Workflow functions**: `extensions.com.cloud-apim.event-brokers.publish` (`connection`, `options`, and
+`event`, `events` or `data` with `type`, `source`, `subject`) and `extensions.com.cloud-apim.event-brokers.consume`
+(`connection`, `options`, `take`: 1, `within_ms`: 5000; acks what it returns):
+
+```json
+{ "kind": "call", "function": "extensions.com.cloud-apim.event-brokers.publish",
+  "args": { "connection": "connection_...", "options": { "topic": "orders" }, "data": { "id": 42 }, "type": "com.acme.order.created" } }
+```
 
 ### Events are CloudEvents
 
@@ -593,6 +622,8 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.RedisStreamsSuite`, `it.MqttSuite`, `it.ArtemisSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
 | `it.TlsSuite`                            | mutual TLS against every broker, with a test CA and certificates created in the Otoroshi store | docker  |
 | `it.AuthSuite`                           | authentication against every broker: Kafka SASL SCRAM and PLAIN, Pulsar tokens, Redis ACL users, MQTT and RabbitMQ passwords | docker  |
+| `it.WebhookSuite`                        | webhooks against an HTTP endpoint in the test jvm: modes, signature, retries, dead letters, alerts, two nodes sharing their locks in Redis | docker  |
+| `it.TryoutSuite`, `it.IntegrationsSuite` | the publish and peek admin routes, the data exporter, the workflow functions, request reply | docker  |
 | `it.MqttReconnectSuite`                  | the mqtt client alone, against a mosquitto restarted on the same port | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip

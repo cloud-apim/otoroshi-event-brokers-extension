@@ -60,6 +60,10 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   through a `ClientLease`, posts each event (`WebhookRequest`), retries with backoff, dead-letters or
   alerts, then acks. **entities/webhooks.scala** holds the entity, read with `Fields`
 - **tryout.scala** - `ConnectionTryout`: the `_publish` and `_peek` admin routes of a connection
+- **integrations.scala** - what the data exporter (`plugins/exporter.scala`) and the workflow functions
+  (`EventBrokersWorkflows`, registered in `start`) share: publish and consume through a lease
+- **replies.scala** - `ReplyListeners`: one reply subscription per connection and destination on each
+  node, for the request reply plugin (`plugins/reply.scala`)
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and
   `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy
@@ -87,7 +91,8 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   protocol (addresses, routing types, queues), not jms; a subscription's session delivers on a thread
   that waits while the subscriber is behind (the consumer window then stops the broker)
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
-  `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
+  `IngesterConsumerWebsocket` (ws.scala), `HttpEventsRequestReply` (reply.scala), `EventBrokersDataExporter`
+  (exporter.scala); events.scala reads requests into events (`Ingest`), writes
   them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka offsets,
   redis stream ids, pulsar message ids, rabbitmq stream offsets, for `Last-Event-ID` resume); utils.scala holds the shared plugin config
   (`EventBrokerPluginConfig`: `options` fixed by the route and evaluated with the expression language,

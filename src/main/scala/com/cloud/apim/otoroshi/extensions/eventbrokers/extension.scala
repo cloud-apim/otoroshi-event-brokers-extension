@@ -2,7 +2,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import org.apache.pekko.stream.scaladsl.StreamConverters
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings, ConnectionTryout, WebhookLocks, WebhookManager, WebhookManagerSettings}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings, ConnectionTryout, EventBrokersWorkflows, ReplyListeners, WebhookLocks, WebhookManager, WebhookManagerSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities._
 import otoroshi.env.Env
 import otoroshi.models._
@@ -65,12 +65,17 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
     new WebhookManager(env, settings, connections, node => WebhookLocks(env, settings, node))
   }
 
+  /** the replies this node waits for, for the request reply plugin */
+  lazy val replies: ReplyListeners = new ReplyListeners(env, connections)
+
   override def start(): Unit = {
     logger.info("the 'Event Brokers Extension' is enabled !")
     connections.start()
+    EventBrokersWorkflows.register()
   }
 
   override def stop(): Unit = {
+    replies.stop()
     webhooks.stop()
     connections.stop()
   }
