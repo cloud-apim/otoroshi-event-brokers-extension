@@ -11,7 +11,7 @@ lazy val excludesSlf4j = Seq(
 
 lazy val root = (project in file("."))
   .settings(
-    name := "otoroshi-extension-event-brokers",
+    name := "otoroshi-event-brokers-extension",
     scalacOptions ++= Seq(
       "-deprecation",
       "-feature",
@@ -23,7 +23,7 @@ lazy val root = (project in file("."))
       "-Wconf:msg=package scala contains object and package with same name:s",
     ),
     assembly / test  := {},
-    assembly / assemblyJarName := "otoroshi-extension-event-brokers-assembly_3-dev.jar",
+    assembly / assemblyJarName := "otoroshi-event-brokers-extension-assembly_3-dev.jar",
     // otoroshi already provides the exact same scala3-library at runtime, no need to ship a
     // second copy of the whole stdlib in the plugin jar
     assembly / assemblyPackageScala / assembleArtifact := false,
