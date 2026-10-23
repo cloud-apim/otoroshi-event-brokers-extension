@@ -303,7 +303,9 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
             if (sig.isInitiatedByApplication) deliveries.complete() else deliveries.fail(sig)
         }
       )
-      def ack(message: Delivery): Future[Unit] = Future(channel.basicAck(message.getEnvelope.getDeliveryTag, false))(using io)
+      // the acks, then the close: an ack the close overtakes gives its message back to the queue
+      val sequence             = new Sequencer(io)
+      def ack(message: Delivery): Future[Unit] = sequence(channel.basicAck(message.getEnvelope.getDeliveryTag, false))
       val events               = spec.delivery match {
         // acked as they are handed over: what the buffer holds is still the broker's
         case DeliveryMode.AtMostOnce  => source.map { message => ack(message); ReceivedEvent.unacked(toEvent(message, queue)) }
@@ -311,10 +313,10 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       }
       // closing the channel gives back what was not acked
       Subscribed(events) { () =>
-        Future {
+        sequence {
           Try(channel.basicCancel(tag))
           Try(if (channel.isOpen) channel.close())
-        }(using io)
+        }
         ()
       }
     } catch {

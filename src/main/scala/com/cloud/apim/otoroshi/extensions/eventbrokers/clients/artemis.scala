@@ -292,6 +292,8 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
       // and the broker stops sending once the consumer window is full
       val room            = new Semaphore(prefetch)
       val closed          = new AtomicBoolean(false)
+      // the acks, then the close: an ack the close overtakes gives its message back to the queue
+      val sequence        = new Sequencer(io)
       val consumers       = addresses.map { address =>
         val queueName = queueFor(session, address, routing, spec)
         val consumer  = session.createConsumer(SimpleString.of(queueName), selector.map(SimpleString.of).orNull)
@@ -300,7 +302,7 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
             room.acquire()
             // not acked: back to its queue once the session is closed
             if (closed.get()) room.release()
-            else { queue.offer(new ReceivedEvent(toEvent(message, queueName), () => Future { message.individualAcknowledge(); () }(using io))); () }
+            else { queue.offer(new ReceivedEvent(toEvent(message, queueName), () => sequence { message.individualAcknowledge(); () })); () }
           }
         })
         consumer
@@ -323,10 +325,10 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
         closed.set(true)
         // a delivery thread waiting for room must not hold the session
         room.release(prefetch + 1)
-        Future {
+        sequence {
           consumers.foreach(c => Try(c.close()))
           Try(session.close())
-        }(using io)
+        }
         queue.complete()
       }
     } catch {

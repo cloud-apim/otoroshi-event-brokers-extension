@@ -102,6 +102,21 @@ object Subscribed {
 }
 
 /**
+ * runs its tasks one after the other, on an execution context. what a subscription acks and its close
+ * go through one: an ack sent before the close is done before it, or the message it acks would go back
+ * to its queue, and be delivered again
+ */
+final class Sequencer(ec: ExecutionContext) {
+  private var last: Future[Unit] = Future.unit
+
+  def apply[A](task: => A): Future[A] = synchronized {
+    val next = last.recover { case _ => () }(using ExecutionContext.parasitic).map(_ => task)(using ec)
+    last = next.map(_ => ())(using ExecutionContext.parasitic)
+    next
+  }
+}
+
+/**
  * the io pool of the manager, kept by the client from its `start`: for the calls of the broker
  * library that block (a send waiting for metadata, a publish waiting for room), which must never run
  * on otoroshi's own threads
