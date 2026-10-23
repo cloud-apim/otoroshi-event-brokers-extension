@@ -16,11 +16,14 @@ import scala.concurrent.duration.*
  */
 class TlsSuite extends BrokerSuite {
 
-  import Gateway.given
-
   override val munitTimeout: Duration = 10.minutes
 
   override def startBroker(): Unit = { certificates; () }
+
+  override def afterAll(): Unit = {
+    super.afterAll()
+    if (!munitIgnore) TlsBrokers.stopAll()
+  }
 
   val CaId     = "event-brokers-tests-ca"
   val ClientId = "event-brokers-tests-client"
@@ -40,13 +43,19 @@ class TlsSuite extends BrokerSuite {
   def tls(more: (String, Json.JsValueWrapper)*): JsObject =
     Json.obj("enabled" -> true, "client_certs" -> Json.arr(ClientId), "trusted_certs" -> Json.arr(CaId)) ++ Json.obj(more*)
 
-  /** a connection that cannot connect, and what it says */
-  def unavailable(kind: String, settings: JsObject): String = {
-    val id = Gateway.createConnection(kind, settings, waitConnected = false)
-    eventually("unavailable")((Gateway.connectionStatus(id).json \ "state").asOpt[String].contains("unavailable"))
-    val error = (Gateway.connectionStatus(id).json \ "error").asOpt[String].getOrElse("")
-    Gateway.deleteConnection(id)
-    error
+  /**
+   * a connection that cannot connect, and what it says once it says what is expected (a first attempt
+   * that times out on a busy machine says less than the next ones)
+   */
+  def unavailable(kind: String, settings: JsObject, saying: String => Boolean = _.nonEmpty): String = {
+    val id    = Gateway.createConnection(kind, settings, waitConnected = false)
+    def error = (Gateway.connectionStatus(id).json \ "error").asOpt[String].getOrElse("")
+    try {
+      eventually("unavailable, saying why", 60.seconds)((Gateway.connectionStatus(id).json \ "state").asOpt[String].contains("unavailable") && saying(error))
+      error
+    } catch {
+      case e: RuntimeException => fail(s"${e.getMessage}: ${Gateway.connectionStatus(id).json}")
+    } finally Gateway.deleteConnection(id)
   }
 
   /** publishes three events through the gateway, and reads them back: the broker keeps them meanwhile */
@@ -76,8 +85,7 @@ class TlsSuite extends BrokerSuite {
   }
 
   test("redis: without the ca, the broker is not trusted") {
-    val error = unavailable("redis", redis(redisUri(), tls("trusted_certs" -> Json.arr())))
-    assert(error.toLowerCase.contains("certification path") || error.toLowerCase.contains("pkix"), error)
+    unavailable("redis", redis(redisUri(), tls("trusted_certs" -> Json.arr())), e => e.toLowerCase.contains("certification path") || e.toLowerCase.contains("pkix"))
   }
 
   test("redis: trust_all trusts a broker whatever its certificate") {
@@ -85,14 +93,12 @@ class TlsSuite extends BrokerSuite {
   }
 
   test("redis: a name the certificate does not hold fails, unless hostname_verification is off") {
-    val error = unavailable("redis", redis(redisUri("127.0.0.1"), tls()))
-    assert(error.toLowerCase.contains("subject alternative") || error.toLowerCase.contains("hostname") || error.toLowerCase.contains("127.0.0.1"), error)
+    unavailable("redis", redis(redisUri("127.0.0.1"), tls()), e => e.toLowerCase.contains("subject alternative") || e.toLowerCase.contains("hostname") || e.contains("127.0.0.1"))
     roundTrip(Gateway.createConnection("redis", redis(redisUri("127.0.0.1"), tls("hostname_verification" -> false))), "stream" -> uniq("ip"))("from" -> "earliest")
   }
 
   test("a certificate the store does not have: the connection says which") {
-    val error = unavailable("redis", redis(redisUri(), tls("client_certs" -> Json.arr("nope"))))
-    assert(error.contains("'nope' is not in the certificate store"), error)
+    unavailable("redis", redis(redisUri(), tls("client_certs" -> Json.arr("nope"))), _.contains("'nope' is not in the certificate store"))
   }
 
   test("mqtt over mutual tls") {

@@ -155,6 +155,41 @@ class SettingsSuite extends munit.FunSuite {
     )
   }
 
+  test("rabbitmq: the topology, checked entry by entry") {
+    val topology = Json.obj(
+      "exchanges" -> Json.arr(Json.obj("name" -> "orders", "type" -> "topic")),
+      "queues"    -> Json.arr(Json.obj("name" -> "billing", "type" -> "quorum", "arguments" -> Json.obj("x-max-length" -> 10)), Json.obj("name" -> "audit", "type" -> "stream")),
+      "bindings"  -> Json.arr(Json.obj("exchange" -> "orders", "queue" -> "billing", "routing_key" -> "order.*"))
+    )
+    val settings = read(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> topology)).map(_.asInstanceOf[RabbitMQSettings])
+    assertEquals(settings.map(_.topology.queues.map(_.`type`)), Right(Seq("quorum", "stream")))
+    assertEquals(settings.map(_.streams), Right(Set("audit")))
+    assertEquals(settings.map(_.topology.bindings.head.routingKey), Right("order.*"))
+    assertError(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> Json.obj("queues" -> Json.arr(Json.obj("type" -> "lazy")))), "topology.queues[0].name: required")
+    assertError(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> Json.obj("queues" -> Json.arr(Json.obj("name" -> "q", "type" -> "lazy")))), "topology.queues[0].type: must be one of classic, quorum, stream")
+    assertError(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> Json.obj("queues" -> Json.arr(Json.obj("name" -> "q", "type" -> "stream", "auto_delete" -> true)))), "topology.queues[0].type: a stream queue is durable")
+    assertError(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> Json.obj("bindings" -> Json.arr("orders"))), "topology.bindings[0]: expected an object")
+    assertError(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "topology" -> Json.obj("exchanges" -> Json.arr(Json.obj("name" -> "x", "kind" -> "topic")))), "topology.exchanges[0].kind: unknown field")
+  }
+
+  test("kafka: the producer settings, as kafka properties") {
+    val producer = Json.obj("acks" -> "1", "idempotence" -> false, "compression" -> "zstd", "linger_ms" -> 20, "batch_size" -> 65536, "max_in_flight" -> 10, "delivery_timeout_ms" -> 60000)
+    val settings = read(Kafka, Json.obj("bootstrap_servers" -> Json.arr("k:9092"), "producer" -> producer)).map(_.asInstanceOf[KafkaSettings].producer.properties)
+    assertEquals(
+      settings,
+      Right(Map(
+        "acks" -> "1", "enable.idempotence" -> "false", "compression.type" -> "zstd", "linger.ms" -> "20", "batch.size" -> "65536",
+        "max.in.flight.requests.per.connection" -> "10", "delivery.timeout.ms" -> "60000"
+      ))
+    )
+    assertEquals(KafkaProducer().properties, Map.empty[String, String])
+    val base = Json.obj("bootstrap_servers" -> Json.arr("k:9092"))
+    assertError(Kafka, base ++ Json.obj("producer" -> Json.obj("acks" -> "2")), "producer.acks: must be all, 1 or 0")
+    assertError(Kafka, base ++ Json.obj("producer" -> Json.obj("idempotence" -> true, "acks" -> "1")), "producer.idempotence: needs acks all")
+    assertError(Kafka, base ++ Json.obj("producer" -> Json.obj("idempotence" -> true, "max_in_flight" -> 6)), "producer.idempotence: needs max_in_flight 5 at most")
+    assertError(Kafka, base ++ Json.obj("producer" -> Json.obj("compression" -> "brotli")), "producer.compression: must be one of")
+  }
+
   test("artemis") {
     assertEquals(read(Artemis, Json.obj("url" -> "tcp://a:61616")), Right(ArtemisSettings(url = "tcp://a:61616")))
     assertEquals(ArtemisSettings(url = "tcp://a:61616").defaultRoutingType, "multicast")

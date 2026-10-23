@@ -36,7 +36,10 @@ class ConnectionsSuite extends BrokerSuite {
 
   override def startBroker(): Unit = { redis; () }
 
-  override def afterAll(): Unit = if (!munitIgnore) redis.stop()
+  override def afterAll(): Unit = {
+    super.afterAll()
+    if (!munitIgnore) redis.stop()
+  }
 
   def redisUri: String = s"redis://${redis.getHost}:${redis.getMappedPort(6379)}"
 

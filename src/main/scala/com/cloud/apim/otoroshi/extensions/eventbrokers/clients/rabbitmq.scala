@@ -8,7 +8,7 @@ import org.apache.pekko.stream.Materializer
 import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
 import otoroshi.utils.syntax.implicits.*
-import play.api.libs.json.{JsObject, Json}
+import play.api.libs.json.{JsBoolean, JsNumber, JsObject, JsString, JsValue, Json}
 
 import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.atomic.AtomicReference
@@ -45,7 +45,41 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
   /** the publishes the broker returned: no queue got them */
   private val returned = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
 
-  override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = false, replay = false, keys = false, headers = true)
+  // replay: what a stream holds (a queue of the stream type), the other queues refuse it
+  override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = true, groups = false, replay = true, keys = false, headers = true)
+
+  private def javaValue(value: JsValue): AnyRef = value match {
+    case JsString(s)                     => s
+    case JsNumber(n) if n.isValidLong    => java.lang.Long.valueOf(n.toLong)
+    case JsNumber(n)                     => java.lang.Double.valueOf(n.toDouble)
+    case JsBoolean(b)                    => java.lang.Boolean.valueOf(b)
+    case other                           => Json.stringify(other)
+  }
+
+  private def arguments(o: JsObject): java.util.Map[String, AnyRef] = o.value.view.mapValues(javaValue).toMap.asJava
+
+  /** the topology of the connection, declared (or found the same) before anything else */
+  private def declare(connection: Connection): Unit = {
+    // one channel per declaration: the broker closes the channel of a declaration it refuses
+    def withChannel(what: String)(f: Channel => Unit): Unit = {
+      val channel = connection.createChannel()
+      try f(channel)
+      // not chained: the status of a connection says the innermost message, which says nothing of what was declared
+      catch { case NonFatal(e) => throw new IllegalStateException(s"could not declare $what: ${ConnectionManager.describe(e)}") }
+      finally Try(if (channel.isOpen) channel.close())
+    }
+    val topology = settings.topology
+    topology.exchanges.foreach { e =>
+      withChannel(s"the exchange '${e.name}'")(_.exchangeDeclare(e.name, e.`type`, e.durable, e.autoDelete, false, arguments(e.arguments)))
+    }
+    topology.queues.foreach { q =>
+      val args = if (q.`type` == "classic") q.arguments else q.arguments ++ Json.obj("x-queue-type" -> q.`type`)
+      withChannel(s"the queue '${q.name}'")(_.queueDeclare(q.name, q.durable, false, q.autoDelete, arguments(args)))
+    }
+    topology.bindings.foreach { b =>
+      withChannel(s"the binding of '${b.queue}' to '${b.exchange}'")(_.queueBind(b.queue, b.exchange, b.routingKey, arguments(b.arguments)))
+    }
+  }
 
   private def connection: Connection = connectionRef.get().getOrElse(throw new IllegalStateException("the rabbitmq client is not started"))
 
@@ -57,6 +91,12 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       if (settings.tls.hostnameVerification && !settings.tls.trustAll) factory.enableHostnameVerification()
     }
     val connection = factory.newConnection(settings.addresses.map(s => Address.parseAddress(s)).toArray)
+    try declare(connection)
+    catch {
+      case NonFatal(e) =>
+        Try(connection.close())
+        throw e
+    }
     connectionRef.set(Some(connection))
     publisherRef.set(Some(newPublisher(connection)))
   }
@@ -178,7 +218,7 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       })
     }
 
-  private def toEvent(message: Delivery): BrokerMessage = {
+  private def toEvent(message: Delivery, queue: String): BrokerMessage = {
     val props                        = Option(message.getProperties)
     val envelope                     = message.getEnvelope
     val headers: Map[String, AnyRef] = props.flatMap(p => Option(p.getHeaders)).map(_.asScala.toMap).getOrElse(Map.empty[String, AnyRef]) - publishIdHeader
@@ -192,8 +232,9 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
         "exchange"     -> envelope.getExchange,
         "routing_key"  -> envelope.getRoutingKey,
         "delivery_tag" -> envelope.getDeliveryTag.toString,
-        "redelivered"  -> envelope.isRedeliver.toString
-      ) ++ props.toSeq.flatMap { p =>
+        "redelivered"  -> envelope.isRedeliver.toString,
+        "queue"        -> queue
+      ) ++ headers.get("x-stream-offset").map(offset => "stream_offset" -> offset.toString) ++ props.toSeq.flatMap { p =>
         Seq(
           opt("content_type", p.getContentType),
           opt("content_encoding", p.getContentEncoding),
@@ -236,12 +277,25 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
           channel.queueDeclarePassive(name)
           name
       }
+      val stream               = settings.streams.contains(queue) || spec.options.select("stream").asOpt[String].contains("true")
+      // a stream starts where it is told, from its next message without
+      val offset: Option[AnyRef] = spec.from match {
+        case StartFrom.Latest               => None
+        case _ if !stream                   =>
+          throw new IllegalArgumentException(s"only a rabbitmq stream replays: '$queue' is not one (declare it as a stream in the topology, or say stream=true)")
+        case StartFrom.Earliest             => Some("first")
+        case StartFrom.Timestamp(millis)    => Some(new Date(millis))
+        case StartFrom.Offset(offset)       => Some(java.lang.Long.valueOf(offset))
+        case StartFrom.Positions(positions) =>
+          Some(positions.get(queue).flatMap(_.toLongOption).map(last => java.lang.Long.valueOf(last + 1)).getOrElse("next"))
+      }
       given Materializer = env.otoroshiMaterializer
       // never more than `prefetch` unacked messages are delivered: the buffer does not overflow
       val (deliveries, source) = Source.queue[Delivery](prefetch + 16).preMaterialize()
       val tag                  = channel.basicConsume(
         queue,
         false,
+        offset.map(o => Map[String, AnyRef]("x-stream-offset" -> o).asJava).orNull,
         new DeliverCallback { override def handle(tag: String, message: Delivery): Unit = { deliveries.offer(message); () } },
         new CancelCallback { override def handle(tag: String): Unit = deliveries.complete() },
         new ConsumerShutdownSignalCallback {
@@ -252,8 +306,8 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
       def ack(message: Delivery): Future[Unit] = Future(channel.basicAck(message.getEnvelope.getDeliveryTag, false))(using io)
       val events               = spec.delivery match {
         // acked as they are handed over: what the buffer holds is still the broker's
-        case DeliveryMode.AtMostOnce  => source.map { message => ack(message); ReceivedEvent.unacked(toEvent(message)) }
-        case DeliveryMode.AtLeastOnce => source.map(message => new ReceivedEvent(toEvent(message), () => ack(message)))
+        case DeliveryMode.AtMostOnce  => source.map { message => ack(message); ReceivedEvent.unacked(toEvent(message, queue)) }
+        case DeliveryMode.AtLeastOnce => source.map(message => new ReceivedEvent(toEvent(message, queue), () => ack(message)))
       }
       // closing the channel gives back what was not acked
       Subscribed(events) { () =>

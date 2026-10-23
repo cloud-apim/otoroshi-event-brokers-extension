@@ -8,19 +8,28 @@ import scala.concurrent.duration.*
 /** authentication against every broker: who it knows gets in, nobody else */
 class AuthSuite extends BrokerSuite {
 
-  import Gateway.given
-
   override val munitTimeout: Duration = 10.minutes
 
   override def startBroker(): Unit = ()
 
-  /** a connection that cannot connect, and what it says */
-  def unavailable(kind: String, settings: JsObject): String = {
+  override def afterAll(): Unit = {
+    super.afterAll()
+    if (!munitIgnore) AuthBrokers.stopAll()
+  }
+
+  /**
+   * a connection that cannot connect, and what it says once it says what is expected (a first attempt
+   * that times out on a busy machine says less than the next ones)
+   */
+  def unavailable(kind: String, settings: JsObject, saying: String => Boolean = _.nonEmpty): String = {
     val id    = Gateway.createConnection(kind, settings, waitConnected = false)
-    eventually("unavailable")((Gateway.connectionStatus(id).json \ "state").asOpt[String].contains("unavailable"))
-    val error = (Gateway.connectionStatus(id).json \ "error").asOpt[String].getOrElse("")
-    Gateway.deleteConnection(id)
-    error
+    def error = (Gateway.connectionStatus(id).json \ "error").asOpt[String].getOrElse("")
+    try {
+      eventually("unavailable, saying why", 60.seconds)((Gateway.connectionStatus(id).json \ "state").asOpt[String].contains("unavailable") && saying(error))
+      error
+    } catch {
+      case e: RuntimeException => fail(s"${e.getMessage}: ${Gateway.connectionStatus(id).json}")
+    } finally Gateway.deleteConnection(id)
   }
 
   /** publishes three events and reads them back, the broker keeping them meanwhile */
@@ -54,8 +63,7 @@ class AuthSuite extends BrokerSuite {
   }
 
   test("kafka: a wrong password is refused") {
-    val error = unavailable("kafka", kafka("SCRAM-SHA-512", "alice", "nope"))
-    assert(error.toLowerCase.contains("authentication"), error)
+    unavailable("kafka", kafka("SCRAM-SHA-512", "alice", "nope"), _.toLowerCase.contains("authentication"))
   }
 
   def pulsar(auth: JsObject): JsObject = Json.obj("service_url" -> s"pulsar://localhost:${AuthBrokers.pulsar.getMappedPort(6650)}", "auth" -> auth)
@@ -78,10 +86,8 @@ class AuthSuite extends BrokerSuite {
   }
 
   test("redis: a wrong password, or no user at all, is refused") {
-    val wrong = unavailable("redis", redis("username" -> "alice", "password" -> "nope"))
-    assert(wrong.contains("WRONGPASS"), wrong)
-    val none  = unavailable("redis", redis())
-    assert(none.contains("NOAUTH"), none)
+    unavailable("redis", redis("username" -> "alice", "password" -> "nope"), _.contains("WRONGPASS"))
+    unavailable("redis", redis(), _.contains("NOAUTH"))
   }
 
   def mqtt(more: (String, Json.JsValueWrapper)*): JsObject =
@@ -104,7 +110,10 @@ class AuthSuite extends BrokerSuite {
 
   test("rabbitmq: a wrong password is refused") {
     val broker = Brokers.rabbitmq
-    val error  = unavailable("rabbitmq", Json.obj("addresses" -> Json.arr(s"localhost:${broker.getAmqpPort}"), "username" -> broker.getAdminUsername, "password" -> "nope"))
-    assert(error.contains("ACCESS_REFUSED") || error.toLowerCase.contains("refused"), error)
+    unavailable(
+      "rabbitmq",
+      Json.obj("addresses" -> Json.arr(s"localhost:${broker.getAmqpPort}"), "username" -> broker.getAdminUsername, "password" -> "nope"),
+      e => e.contains("ACCESS_REFUSED") || e.toLowerCase.contains("refused")
+    )
   }
 }

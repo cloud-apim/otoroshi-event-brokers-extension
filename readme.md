@@ -147,10 +147,16 @@ What each broker can do (anything else is refused with a `400`):
 | without a group | a consumer group of its own: every event | consumers of a queue share it; `exchange` + `routing_key`: a queue of its own, every message | a non durable subscription of its own: every message | every message | `XREAD`: every entry | every message | multicast: a temporary queue of its own, every message. anycast: the consumers of the queue share it |
 | `group` | consumer group | no (a queue already is one) | durable subscription, shared (`subscription_type`: `exclusive`, `shared`, `failover`, `key_shared`) | no | consumer group (`XREADGROUP`), created where `from` says if it does not exist | MQTT 5: a shared subscription (`$share/<group>/<topic>`) | multicast: a durable queue named after the group, shared (a JMS shared durable subscription) |
 | `at-least-once` | commits what was handed over | acks, the rest goes back to the queue | acks, the rest is delivered again | no | in a group: `XACK` once handed over, the rest goes to another member | no | acks, the rest goes back to the queue (a group on a multicast address) |
-| `from` / replay | `earliest`, `from_timestamp`, `offset_from` | no | `earliest` (new group), `from_timestamp` | no | `earliest`, `from_timestamp`, `from_id` | no | no |
+| `from` / replay | `earliest`, `from_timestamp`, `offset_from` | streams only: `earliest`, `from_timestamp`, `offset_from` | `earliest` (new group), `from_timestamp` | no | `earliest`, `from_timestamp`, `from_id` | no | no |
 
 Other options: `prefetch` (RabbitMQ, Redis streams and Artemis, 100), `qos` (MQTT), `client_id` and
-`group_instance_id` (Kafka), `consumer` (Redis streams), `routing_type` and `selector` (Artemis).
+`group_instance_id` (Kafka), `consumer` (Redis streams), `routing_type` and `selector` (Artemis),
+`stream=true` (RabbitMQ: the queue is a stream, when the connection's topology does not say so).
+
+**RabbitMQ streams**: a queue of the `stream` type is an append-only log. Reading it does not take its
+messages away, and a subscription starts where it is told (`x-stream-offset`): `from=earliest`, an
+offset (`offset_from`, each event carries its `rabbitmqstreamoffset`), a date (`from_timestamp`, to the
+second: a stream dates its chunks of messages), or from now on.
 
 **Redis streams groups**: an entry read by a member is its own until acked: as it leaves the
 subscription (`at-most-once`) or once handed over (`at-least-once`). What a member read and left unacked
@@ -175,10 +181,10 @@ empty line when nothing happens. The **SSE consumer**:
 
 - names each event after its `type` (`event:`), and gives every line of the data its own `data:` field
 - sends a `: keep-alive` comment every 15 seconds without events (`heartbeat=<millis>`, `0` to stop)
-- gives each event an `id:`. On Kafka and Redis streams it holds the positions read (on every partition,
-  in every stream): a client coming back with it in `Last-Event-ID` (what `EventSource` does by itself)
-  resumes right after what it got. In a Redis streams group, the group knows where it is: the position is
-  not used
+- gives each event an `id:`. On Kafka, Redis streams, Pulsar and RabbitMQ streams it holds the positions
+  read (on every partition, stream or topic): a client coming back with it in `Last-Event-ID` (what
+  `EventSource` does by itself) resumes right after what it got. In a group (Redis streams, Kafka), the
+  group knows where it is: the position is not used
 - answers with `Cache-Control: no-cache` and `X-Accel-Buffering: no`, so that no proxy holds the events
 
 The **websocket plugin** has an `in` and an `out` configuration (either can be left without a `ref`):
@@ -346,6 +352,10 @@ Artemis get files of their own, deleted when the client closes.
     "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true,
     "keystore_path": null, "truststore_path": null, "store_password": null
   },
+  "producer": {
+    "acks": null, "idempotence": null, "compression": null, "linger_ms": null, "batch_size": null,
+    "max_in_flight": null, "delivery_timeout_ms": null
+  },
   "properties": {}
 }
 ```
@@ -353,8 +363,11 @@ Artemis get files of their own, deleted when the client closes.
 `security_protocol` is `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`; the `SASL_*` ones need a
 username and a password (the login module of the mechanism is used), or a `jaas_config`. TLS (`SSL`,
 `SASL_SSL`) uses certificates of the Otoroshi store, or keystore and truststore files
-(`keystore_path`, `truststore_path`, `store_password`), not both. `properties` are raw Kafka client
-properties, applied last.
+(`keystore_path`, `truststore_path`, `store_password`), not both. `producer` tunes how events are sent:
+`acks` (`all`, `1`, `0`), `idempotence` (which needs `acks` `all` and 5 requests in flight at most),
+`compression` (`none`, `gzip`, `snappy`, `lz4`, `zstd`), `linger_ms`, `batch_size`, `max_in_flight`,
+`delivery_timeout_ms`; what is not set keeps the default of the Kafka client. `properties` are raw
+Kafka client properties, applied last.
 
 **rabbitmq** (`addresses` is required)
 
@@ -365,11 +378,20 @@ properties, applied last.
   "username": null,
   "password": null,
   "default_queue": null,
-  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true }
+  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true },
+  "topology": {
+    "exchanges": [{ "name": "orders", "type": "topic", "durable": true, "auto_delete": false, "arguments": {} }],
+    "queues": [{ "name": "billing", "type": "quorum", "durable": true, "auto_delete": false, "arguments": { "x-max-length": 10000 } }],
+    "bindings": [{ "exchange": "orders", "queue": "billing", "routing_key": "order.*", "arguments": {} }]
+  }
 }
 ```
 
-An address without a port is reached on 5671 with TLS, 5672 without.
+An address without a port is reached on 5671 with TLS, 5672 without. The `topology` (empty by
+default) is declared as the client starts, before anything else: what exists already, the same way, is
+left as it is, and a declaration the broker refuses (a queue that exists with other arguments) keeps
+the connection `unavailable`, saying which. Queues are `classic`, `quorum` or `stream` (the last two
+durable, and not auto deleted).
 
 **pulsar** (`service_url` is required: `pulsar://` or `pulsar+ssl://`)
 

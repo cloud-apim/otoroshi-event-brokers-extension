@@ -117,6 +117,26 @@ class EventBrokerConnectionsPage extends Component {
     'settings.auth.username': input('string', 'Username'),
     'settings.auth.password': input('password', 'Password'),
     'settings.tls.trust_certs_file_path': input('string', 'Trusted certificates file (pem)'),
+    // kafka producer: what is left empty keeps the default of the kafka client
+    'settings.producer.acks': input('select', 'Acks', {
+      possibleValues: [
+        { value: '', label: 'Kafka default' },
+        { value: 'all', label: 'all (every in-sync replica)' },
+        { value: '1', label: '1 (the leader)' },
+        { value: '0', label: '0 (nobody)' },
+      ],
+    }),
+    'settings.producer.compression': input('select', 'Compression', {
+      possibleValues: ['', 'none', 'gzip', 'snappy', 'lz4', 'zstd'].map((v) => ({ value: v, label: v || 'Kafka default' })),
+    }),
+    // rabbitmq
+    'settings.topology': {
+      type: 'jsonobjectcode',
+      props: {
+        label: 'Topology',
+        help: 'Declared as the connection starts: {"exchanges": [{"name", "type"}], "queues": [{"name", "type": "classic|quorum|stream"}], "bindings": [{"exchange", "queue", "routing_key"}]}',
+      },
+    },
     // redis
     'settings.uri': input('string', 'URI', { placeholder: 'redis://host:6379, rediss:// for TLS' }),
     'settings.mode': input('select', 'Mode', {
@@ -223,6 +243,9 @@ class EventBrokerConnectionsPage extends Component {
           'settings.tls.keystore_path',
           'settings.tls.truststore_path',
           'settings.tls.store_password',
+          '>>>Producer',
+          'settings.producer.acks',
+          'settings.producer.compression',
           '>>>Client properties',
           'settings.properties',
         ]);
@@ -231,6 +254,8 @@ class EventBrokerConnectionsPage extends Component {
           'settings.addresses',
           'settings.virtual_host',
           'settings.default_queue',
+          '>>>Topology',
+          'settings.topology',
           '>>>Authentication',
           'settings.username',
           'settings.password',

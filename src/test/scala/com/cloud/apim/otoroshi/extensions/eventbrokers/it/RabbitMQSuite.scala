@@ -37,7 +37,10 @@ class RabbitMQSuite extends BrokerSuite {
   }
   lazy val channel: Channel = amqp.createChannel()
 
-  override def afterAll(): Unit = if (!munitIgnore) amqp.close()
+  override def afterAll(): Unit = {
+    super.afterAll()
+    if (!munitIgnore) amqp.close()
+  }
 
   /** outside of dev mode the extension declares nothing: the queue has to exist */
   def queue(): String = {
@@ -126,6 +129,79 @@ class RabbitMQSuite extends BrokerSuite {
     keepPublishing(one.zip(other))(n => Gateway.post(ingester, path, Json.stringify(message(n, run))))
     assertConsecutive(numbers(await(one)), 3)
     assertConsecutive(numbers(await(other)), 3)
+  }
+
+  /** a connection of its own, with a topology */
+  def withTopology(topology: JsObject, waitConnected: Boolean = true): String = Gateway.createConnection(
+    "rabbitmq",
+    Json.obj(
+      "addresses" -> Json.arr(s"${Brokers.rabbitmq.getHost}:${Brokers.rabbitmq.getAmqpPort}"),
+      "username"  -> Brokers.rabbitmq.getAdminUsername,
+      "password"  -> Brokers.rabbitmq.getAdminPassword,
+      "topology"  -> topology
+    ),
+    waitConnected
+  )
+
+  test("the topology of the connection is declared as it starts: exchanges, queues, bindings") {
+    val exchange   = uniq("orders")
+    val billing    = uniq("billing")
+    val connection = withTopology(Json.obj(
+      "exchanges" -> Json.arr(Json.obj("name" -> exchange, "type" -> "topic")),
+      "queues"    -> Json.arr(Json.obj("name" -> billing, "type" -> "quorum", "arguments" -> Json.obj("x-max-length" -> 1000))),
+      "bindings"  -> Json.arr(Json.obj("exchange" -> exchange, "queue" -> billing, "routing_key" -> "order.*"))
+    ))
+    val in         = Gateway.brokerRoute[HttpEventsIngester](connection)
+    val out        = Gateway.brokerRoute[HttpEventsConsumer](connection)
+    val run        = uniq("run")
+    (0 until 3).foreach { n =>
+      val (status, lines) = Gateway.post(in, "/" + opts("exchange" -> exchange, "routing_key" -> (if (n == 1) "invoice.sent" else "order.created")), Json.stringify(message(n, run)))
+      assertEquals(status, 200, lines.toString)
+    }
+    // what the binding lets through, in a quorum queue
+    assertEquals(numbers(await(collect(Gateway.ndjson(out, "/" + opts("queue" -> billing)), take = 2))), Seq(0, 2))
+    assertEquals(channel.queueDeclarePassive(billing).getMessageCount, 0)
+  }
+
+  test("a declaration the broker refuses keeps the connection unavailable, saying why") {
+    val name  = queue()
+    // a classic queue cannot be declared again as a quorum one
+    val id    = withTopology(Json.obj("queues" -> Json.arr(Json.obj("name" -> name, "type" -> "quorum"))), waitConnected = false)
+    eventually("unavailable")((Gateway.connectionStatus(id).json \ "state").asOpt[String].contains("unavailable"))
+    val error = (Gateway.connectionStatus(id).json \ "error").as[String]
+    assert(error.contains(s"could not declare the queue '$name'") && error.contains("PRECONDITION_FAILED"), error)
+  }
+
+  test("a stream replays: from the first message, an offset, a date, and an sse client resumes right after what it got") {
+    val stream     = uniq("stream")
+    val connection = withTopology(Json.obj("queues" -> Json.arr(Json.obj("name" -> stream, "type" -> "stream"))))
+    val in         = Gateway.brokerRoute[HttpEventsIngester](connection)
+    val out        = Gateway.brokerRoute[HttpEventsConsumer](connection)
+    val events     = Gateway.brokerRoute[SseEventConsumer](connection)
+    val run        = uniq("run")
+    (0 until 5).foreach { n =>
+      if (n == 3) Thread.sleep(1100L)
+      assertEquals(Gateway.post(in, "/" + opts("queue" -> stream), Json.stringify(message(n, run)))._1, 200)
+    }
+    val all        = await(collect(Gateway.ndjson(out, "/" + opts("queue" -> stream, "from" -> "earliest")), take = 5))
+    assertEquals(numbers(all), Seq(0, 1, 2, 3, 4))
+    val offsets    = all.map(e => ext(e, "rabbitmqstreamoffset").get.toLong)
+    assertEquals(numbers(await(collect(Gateway.ndjson(out, "/" + opts("queue" -> stream, "offset_from" -> offsets(2))), take = 3))), Seq(2, 3, 4))
+    // a stream keeps the time of its chunks, to the second
+    val since      = (all(3) \ "time").as[String]
+    val fromDate   = numbers(await(collect(Gateway.ndjson(out, "/" + opts("queue" -> stream, "from_timestamp" -> java.time.Instant.parse(since).toEpochMilli)), take = 5, within = 5.seconds)))
+    assert(fromDate.nonEmpty && fromDate.last == 4 && fromDate.contains(3), fromDate.toString)
+    val first      = await(collect(Gateway.sse(events, "/" + opts("queue" -> stream, "from" -> "earliest", "take" -> 2)).filter(_.id.isDefined), take = 2))
+    assert(first.last.id.exists(_.startsWith("rabbitmq:")), first.toString)
+    val rest       = await(collect(Gateway.sse(events, "/" + opts("queue" -> stream), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 3))
+    assertEquals(numbers(rest.map(e => Json.parse(e.data))), Seq(2, 3, 4))
+  }
+
+  test("a queue that is not a stream does not replay") {
+    val res  = await(Gateway.request(consumer, path = "/" + opts("queue" -> queue(), "from" -> "earliest")))
+    val body = await(res.entity.toStrict(10.seconds)).data.utf8String
+    assertEquals(res.status.intValue(), 400, body)
+    assert(body.contains("only a rabbitmq stream replays"), body)
   }
 
   test("a group is refused: the consumers of a queue already share it") {

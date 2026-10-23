@@ -157,7 +157,7 @@ object Output {
 
 /**
  * The `id` of the server-sent events. Where the broker can resume from a position (kafka, redis
- * streams), the positions read so far (on every partition, in every stream), so that a client sending
+ * streams, pulsar, rabbitmq streams), the positions read so far (on every partition, in every stream or topic), so that a client sending
  * it back in `Last-Event-ID` resumes right after them. Elsewhere, the id of the event.
  */
 object SseIds {
@@ -177,7 +177,7 @@ object SseIds {
       }
     }
 
-  /** where a message is: `topic:partition` and its offset on kafka, its stream and its id on redis streams */
+  /** where a message is: `topic:partition` and its offset on kafka, its stream and its id on redis streams, its topic and its message id on pulsar, its stream (queue) and its offset on rabbitmq */
   def position(kind: EventBrokerConnectionKind, message: BrokerMessage): Option[(String, String)] = kind match {
     case EventBrokerConnectionKind.Kafka =>
       for {
@@ -190,6 +190,16 @@ object SseIds {
         stream <- message.metadata.get("stream")
         id     <- message.metadata.get("id")
       } yield (stream, id)
+    case EventBrokerConnectionKind.RabbitMQ =>
+      for {
+        queue  <- message.metadata.get("queue")
+        offset <- message.metadata.get("stream_offset")
+      } yield (queue, offset)
+    case EventBrokerConnectionKind.Pulsar =>
+      for {
+        topic <- message.metadata.get("topic")
+        id    <- message.metadata.get("message_id_bytes")
+      } yield (topic, id)
     case _                               => None
   }
 

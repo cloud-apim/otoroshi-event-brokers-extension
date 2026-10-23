@@ -55,10 +55,11 @@ Taken on 2026-10-22, not to be discussed again:
   (mutual TLS) against each broker: Kafka (inline PEM, no files), RabbitMQ, Pulsar, Redis, MQTT, Artemis
 - [x] Authentication tested on every broker: Kafka SASL SCRAM (and PLAIN), Pulsar tokens, users and passwords
   of RabbitMQ, Redis (ACL), MQTT and Artemis; the Kafka JAAS configuration is built from the mechanism
-- [ ] Extras:
-  - [ ] Pulsar: SSE resume by message id
-  - [ ] RabbitMQ: declarative topology (exchanges, queues, bindings), RabbitMQ streams
-  - [ ] Kafka: producer tuning (acks, idempotence, compression, batching, linger)
+- [x] Extras:
+  - [x] Pulsar: SSE resume by message id, partitioned topics included
+  - [x] RabbitMQ: declarative topology (exchanges, queues of every type, bindings), RabbitMQ streams (replay
+    from the first message, an offset, a date; SSE resume)
+  - [x] Kafka: producer tuning (acks, idempotence, compression, batching, linger)
 
 ## Phase 3: features on top
 

@@ -2,6 +2,7 @@ package com.cloud.apim.otoroshi.extensions.eventbrokers.it
 
 import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.*
 import play.api.libs.json.*
+import play.api.libs.ws.JsonBodyWritables.writeableOf_JsValue
 
 import scala.concurrent.duration.*
 
@@ -123,6 +124,29 @@ class PulsarSuite extends BrokerSuite {
     eventually("the first subscriber gone")(consumersOf(topic, group) == 0)
     val rest  = await(collect(Gateway.ndjson(consumer, path(2)), take = 2))
     assertEquals(numbers(rest).sorted, Seq(1, 2))
+  }
+
+  test("sse: a client coming back resumes right after the last message it got") {
+    val topic = uniq("sse-resume")
+    val run   = uniq("run")
+    (0 until 5).foreach(n => publish(topic, n, run))
+    val first = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic, "from" -> "earliest", "take" -> 2)).filter(_.id.isDefined), take = 2))
+    assertEquals(numbers(first.map(e => Json.parse(e.data))), Seq(0, 1))
+    assert(first.last.id.exists(_.startsWith("pulsar:")), first.toString)
+    val rest  = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 3))
+    assertEquals(numbers(rest.map(e => Json.parse(e.data))), Seq(2, 3, 4))
+  }
+
+  test("sse: resuming a partitioned topic, partition by partition") {
+    val topic = uniq("sse-partitioned")
+    val run   = uniq("run")
+    val res   = await(Gateway.ws.url(s"${Brokers.pulsar.getHttpServiceUrl}/admin/v2/persistent/public/default/$topic/partitions").addHttpHeaders("Content-Type" -> "application/json").put(Json.toJson(3): JsValue))
+    assert(res.status < 300, res.body)
+    (0 until 9).foreach(n => publish(topic, n, run))
+    val first = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic, "from" -> "earliest", "take" -> 4)).filter(_.id.isDefined), take = 4))
+    val rest  = await(collect(Gateway.sse(sse, "/" + opts("topic" -> topic), Seq("Last-Event-ID" -> first.last.id.get)).filter(_.id.isDefined), take = 5, within = 15.seconds))
+    // every message once, wherever it was
+    assertEquals((numbers(first.map(e => Json.parse(e.data))) ++ numbers(rest.map(e => Json.parse(e.data)))).sorted, (0 until 9).toSeq)
   }
 
   test("an offset is not a pulsar position: refused") {

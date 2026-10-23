@@ -12,6 +12,19 @@ import javax.crypto.spec.SecretKeySpec
 /** the brokers of the authentication tests, each one refusing whoever it does not know */
 object AuthBrokers {
 
+  private val started = new java.util.concurrent.CopyOnWriteArrayList[org.testcontainers.containers.GenericContainer[?]]()
+
+  private def started[C <: org.testcontainers.containers.GenericContainer[?]](container: C): C = {
+    started.add(container)
+    container
+  }
+
+  /** stops the brokers started so far: they are only needed by their suite */
+  def stopAll(): Unit = {
+    started.forEach(c => scala.util.Try(c.stop()))
+    started.clear()
+  }
+
   private def text(content: String): Transferable = Transferable.of(content.getBytes(StandardCharsets.UTF_8), 0x1a4)
 
   // ---------------------------------------------------------------------------------------------
@@ -51,7 +64,7 @@ object AuthBrokers {
     )
     container.waitingFor(Wait.forLogMessage(".*Kafka Server started.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -86,7 +99,7 @@ object AuthBrokers {
     container.withExposedPorts(6650)
     container.waitingFor(Wait.forLogMessage(".*messaging service is ready.*", 1).withStartupTimeout(java.time.Duration.ofMinutes(3)))
     container.start()
-    container
+    started(container)
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -99,7 +112,7 @@ object AuthBrokers {
     container.withExposedPorts(6379)
     container.waitingFor(Wait.forLogMessage(".*Ready to accept connections.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -117,6 +130,6 @@ object AuthBrokers {
     container.withExposedPorts(1883)
     container.waitingFor(Wait.forLogMessage(".*mosquitto version .* running.*", 1))
     container.start()
-    container
+    started(container)
   }
 }

@@ -14,6 +14,19 @@ import java.nio.charset.StandardCharsets
  */
 object TlsBrokers {
 
+  private val started = new java.util.concurrent.CopyOnWriteArrayList[org.testcontainers.containers.GenericContainer[?]]()
+
+  private def started[C <: org.testcontainers.containers.GenericContainer[?]](container: C): C = {
+    started.add(container)
+    container
+  }
+
+  /** stops the brokers started so far: they are only needed by their suite */
+  def stopAll(): Unit = {
+    started.forEach(c => scala.util.Try(c.stop()))
+    started.clear()
+  }
+
   private def text(content: String): Transferable = Transferable.of(content.getBytes(StandardCharsets.UTF_8), 0x1a4) // 0644
   private def binary(content: Array[Byte]): Transferable = Transferable.of(content, 0x1a4)
 
@@ -31,7 +44,7 @@ object TlsBrokers {
     container.withExposedPorts(6379)
     container.waitingFor(Wait.forLogMessage(".*Ready to accept connections.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   lazy val mosquitto: Container = {
@@ -50,7 +63,7 @@ object TlsBrokers {
     container.withExposedPorts(8883)
     container.waitingFor(Wait.forLogMessage(".*mosquitto version .* running.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   lazy val rabbitmq: RabbitMQContainer = {
@@ -67,7 +80,7 @@ object TlsBrokers {
       "/etc/rabbitmq/conf.d/20-tls.conf"
     )
     container.start()
-    container
+    started(container)
   }
 
   lazy val artemis: Container = {
@@ -98,7 +111,7 @@ object TlsBrokers {
     container.withExposedPorts(61617)
     container.waitingFor(Wait.forLogMessage(".*AMQ221007.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   /** kafka tells its clients where its brokers are: the port it advertises is the one of the host */
@@ -135,7 +148,7 @@ object TlsBrokers {
     ).foreach((k, v) => container.withEnv(k, v))
     container.waitingFor(Wait.forLogMessage(".*Kafka Server started.*", 1))
     container.start()
-    container
+    started(container)
   }
 
   lazy val pulsar: PulsarContainer = {
@@ -154,6 +167,6 @@ object TlsBrokers {
     ).foreach((k, v) => container.withEnv(k, v))
     container.addExposedPort(6651)
     container.start()
-    container
+    started(container)
   }
 }

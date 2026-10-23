@@ -22,11 +22,17 @@ abstract class BrokerSuite extends munit.FunSuite {
   /** starts the broker container this suite needs */
   def startBroker(): Unit
 
+  private var firstConnection = 0
+
   override def beforeAll(): Unit = {
     startBroker()
     Gateway.instance
+    firstConnection = Gateway.connectionsCreated
     ()
   }
+
+  /** the connections of the suite go once it is done: their clients would keep working for the next ones */
+  override def afterAll(): Unit = if (!munitIgnore) Gateway.deleteConnectionsFrom(firstConnection)
 
   export Gateway.{await, uniq, eventually}
   import Gateway.given

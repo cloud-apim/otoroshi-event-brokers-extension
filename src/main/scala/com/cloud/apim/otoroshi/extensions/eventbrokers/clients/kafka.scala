@@ -97,6 +97,8 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
     // send blocks while it looks the topic up: not for a minute, and never on otoroshi's threads
     .withProperty(ProducerConfig.MAX_BLOCK_MS_CONFIG, "10000")
+    .withProperties(settings.producer.properties)
+    // the raw properties still come last
     .withProperties(properties)
     .withBootstrapServers(settings.bootstrapServers.mkString(","))
 

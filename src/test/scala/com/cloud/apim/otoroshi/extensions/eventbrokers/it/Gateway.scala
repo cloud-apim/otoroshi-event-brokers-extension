@@ -184,10 +184,20 @@ object Gateway {
    * creates a connection and waits until the extension state has picked it up, and, unless told
    * otherwise, until this node is connected to its broker
    */
+  /** every connection created, in order: a suite deletes its own once done, their clients go with them */
+  private val created = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+  def connectionsCreated: Int = created.size()
+
+  /** deletes the connections created since `mark` (`connectionsCreated` back then) */
+  def deleteConnectionsFrom(mark: Int): Unit =
+    created.asScala.drop(mark).foreach(id => scala.util.Try(deleteConnection(id)))
+
   def createConnection(kind: String, settings: JsObject, waitConnected: Boolean = true): String = {
     val id  = s"connection_${UUID.randomUUID()}"
     val res = await(admin(connectionsPath).post(connectionJson(id, kind, settings)))
     if (res.status > 299) throw new RuntimeException(s"could not create the connection: ${res.status} ${res.body}")
+    created.add(id)
     eventually(s"connection $id in the extension state")(extension.states.connection(id).isDefined)
     if (waitConnected) eventually(s"connection $id connected", 60.seconds)(connectionState(id).contains(ConnectionState.Connected))
     id

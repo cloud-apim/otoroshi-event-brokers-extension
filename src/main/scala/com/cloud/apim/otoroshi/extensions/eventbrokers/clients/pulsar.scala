@@ -8,6 +8,7 @@ import org.apache.pulsar.client.api.{
   Authentication,
   Consumer,
   Message,
+  MessageId,
   Producer,
   PulsarClientException,
   Schema,
@@ -208,22 +209,43 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
           .subscribeAsync()
           .asScala
           .flatMap { consumer =>
-            val positioned = spec.from match {
-              case StartFrom.Timestamp(time) => consumer.seekAsync(time).asScala
-              case StartFrom.Offset(_) | StartFrom.Positions(_) =>
+            val resumed    = spec.from match {
+              case StartFrom.Positions(positions) => Try(positions.view.mapValues(b64 => MessageId.fromByteArray(Base64.getDecoder.decode(b64))).toMap)
+              case _                              => scala.util.Success(Map.empty[String, MessageId])
+            }
+            val positioned = (spec.from, resumed) match {
+              case (_, scala.util.Failure(_))                 => Future.failed(new IllegalArgumentException("the positions to resume from are not pulsar message ids"))
+              case (StartFrom.Timestamp(time), _)             => consumer.seekAsync(time).asScala
+              // each topic (each partition) where the client stopped, the others from now on
+              case (StartFrom.Positions(_), scala.util.Success(ids)) =>
+                consumer.seekAsync((topic: String) => ids.getOrElse(topic, MessageId.latest): Object).asScala
+              case (StartFrom.Offset(_), _)                   =>
                 Future.failed(new IllegalArgumentException("pulsar subscriptions start from earliest, latest or a timestamp"))
-              case _                         => Future.unit
+              case _                                          => Future.unit
             }
             positioned
               .recoverWith { case NonFatal(e) => consumer.closeAsync().asScala.transform(_ => scala.util.Failure(e)) }
-              .map(_ => events(consumer, spec.delivery))
+              .map(_ => events(consumer, spec.delivery, resumed.getOrElse(Map.empty)))
           }
     }
   }
 
-  private def events(consumer: Consumer[Array[Byte]], delivery: DeliveryMode)(using env: Env, ec: ExecutionContext): Source[ReceivedEvent, ?] = {
+  private def events(consumer: Consumer[Array[Byte]], delivery: DeliveryMode, resumed: Map[String, MessageId])(using
+      env: Env,
+      ec: ExecutionContext
+  ): Source[ReceivedEvent, ?] = {
     def ack(message: Message[Array[Byte]]): Future[Unit] = consumer.acknowledgeAsync(message.getMessageId).asScala.map(_ => ())
-    val messages = Source.repeat(()).mapAsync(1)(_ => consumer.receiveAsync().asScala)
+    // a seek lands on the message it is given: resuming is right after it
+    def seen(message: Message[Array[Byte]]): Boolean =
+      resumed.get(message.getTopicName).exists(last => message.getMessageId.compareTo(last) <= 0)
+    val messages = Source
+      .repeat(())
+      .mapAsync(1)(_ => consumer.receiveAsync().asScala)
+      .filterNot { message =>
+        val skip = seen(message)
+        if (skip) ack(message)
+        skip
+      }
     val received = delivery match {
       case DeliveryMode.AtMostOnce  => messages.map { message => ack(message); ReceivedEvent.unacked(toEvent(message)) }
       // what is not acked is delivered again once the consumer is gone

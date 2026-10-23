@@ -82,8 +82,8 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   that waits while the subscriber is behind (the consumer window then stops the broker)
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
   `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
-  them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka offsets or
-  redis stream ids, for `Last-Event-ID` resume); utils.scala holds the shared plugin config
+  them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka offsets,
+  redis stream ids, pulsar message ids, rabbitmq stream offsets, for `Last-Event-ID` resume); utils.scala holds the shared plugin config
   (`EventBrokerPluginConfig`: `options` fixed by the route and evaluated with the expression language,
   `allowed_overrides`, `allowed_topics`), `CallOptions` (the policy: a caller option not allowed is a
   400, caller values are never evaluated, per-event routing is checked too), `subscriptionSpec`

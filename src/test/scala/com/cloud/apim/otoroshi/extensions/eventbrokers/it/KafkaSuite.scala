@@ -117,6 +117,18 @@ class KafkaSuite extends BrokerSuite {
     assertEquals(numbers(rest), Seq(2, 3, 4))
   }
 
+  test("a producer tuned by its connection: compression, acks, linger") {
+    val tuned = Gateway.createConnection("kafka", Json.obj(
+      "bootstrap_servers" -> Json.arr(Brokers.kafka.getBootstrapServers),
+      "producer"          -> Json.obj("compression" -> "zstd", "acks" -> "1", "idempotence" -> false, "linger_ms" -> 20, "batch_size" -> 65536)
+    ))
+    val in    = Gateway.brokerRoute[HttpEventsIngester](tuned)
+    val topic = uniq("tuned")
+    val run   = uniq("run")
+    (0 until 3).foreach(n => assertEquals(Gateway.post(in, "/" + opts("topic" -> topic), Json.stringify(message(n, run)))._1, 200))
+    assertEquals(numbers(await(collect(Gateway.ndjson(consumer, "/" + opts("topic" -> topic, "from" -> "earliest")), take = 3))), Seq(0, 1, 2))
+  }
+
   test("starts from a date") {
     val topic = uniq("from-date")
     val run   = uniq("run")

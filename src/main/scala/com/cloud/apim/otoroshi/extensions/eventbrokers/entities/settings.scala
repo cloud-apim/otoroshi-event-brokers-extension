@@ -96,6 +96,28 @@ private[entities] final class Fields(json: JsObject, path: String, errors: mutab
     result
   }
 
+  /** an array of objects, each read field by field (`key[i].field` in the errors) */
+  def objs[A](key: String)(f: Fields => A): Seq[A] = {
+    seen += key
+    json.value.get(key) match {
+      case None | Some(JsNull)  => Seq.empty
+      case Some(JsArray(items)) =>
+        items.toSeq.zipWithIndex.flatMap {
+          case (o: JsObject, i) =>
+            val fields = new Fields(o, s"${at(key)}[$i]", errors)
+            val result = f(fields)
+            fields.done()
+            Some(result)
+          case (_, i)           =>
+            errors += s"${at(key)}[$i]: expected an object"
+            None
+        }
+      case Some(_)              =>
+        error(key, "expected an array")
+        Seq.empty
+    }
+  }
+
   def done(): Unit = json.keys.filterNot(seen.contains).toSeq.sorted.foreach(key => error(key, "unknown field"))
 }
 
@@ -202,12 +224,68 @@ final case class KafkaTls(
   )
 }
 
+/** how the producer sends: what is not set keeps the default of the kafka client */
+final case class KafkaProducer(
+    /** all (every in-sync replica), 1 (the leader), 0 (nobody) */
+    acks: Option[String] = None,
+    idempotence: Option[Boolean] = None,
+    /** none, gzip, snappy, lz4, zstd */
+    compression: Option[String] = None,
+    lingerMs: Option[Long] = None,
+    batchSize: Option[Int] = None,
+    maxInFlight: Option[Int] = None,
+    deliveryTimeoutMs: Option[Long] = None
+) {
+  def properties: Map[String, String] = Seq(
+    acks.map("acks" -> _),
+    idempotence.map(i => "enable.idempotence" -> i.toString),
+    compression.map("compression.type" -> _),
+    lingerMs.map(l => "linger.ms" -> l.toString),
+    batchSize.map(b => "batch.size" -> b.toString),
+    maxInFlight.map(m => "max.in.flight.requests.per.connection" -> m.toString),
+    deliveryTimeoutMs.map(d => "delivery.timeout.ms" -> d.toString)
+  ).flatten.toMap
+
+  def json: JsObject = Json.obj(
+    "acks"                -> acks,
+    "idempotence"         -> idempotence,
+    "compression"         -> compression,
+    "linger_ms"           -> lingerMs,
+    "batch_size"          -> batchSize,
+    "max_in_flight"       -> maxInFlight,
+    "delivery_timeout_ms" -> deliveryTimeoutMs
+  )
+}
+
+object KafkaProducer {
+  def read(p: Fields): KafkaProducer = {
+    val acks        = p.optString("acks")
+    acks.foreach(a => p.check("acks", Seq("all", "-1", "1", "0").contains(a), "must be all, 1 or 0"))
+    val idempotence = p.opt[Boolean]("idempotence")
+    val inFlight    = p.opt[Int]("max_in_flight")
+    if (idempotence.contains(true) && acks.exists(a => a != "all" && a != "-1")) p.error("idempotence", "needs acks all")
+    if (idempotence.contains(true) && inFlight.exists(_ > 5)) p.error("idempotence", "needs max_in_flight 5 at most")
+    val compression = p.optString("compression")
+    compression.foreach(c => p.check("compression", Seq("none", "gzip", "snappy", "lz4", "zstd").contains(c), "must be one of none, gzip, snappy, lz4, zstd"))
+    KafkaProducer(
+      acks = acks,
+      idempotence = idempotence,
+      compression = compression,
+      lingerMs = p.opt[Long]("linger_ms"),
+      batchSize = p.opt[Int]("batch_size"),
+      maxInFlight = inFlight,
+      deliveryTimeoutMs = p.opt[Long]("delivery_timeout_ms")
+    )
+  }
+}
+
 final case class KafkaSettings(
     bootstrapServers: Seq[String],
     defaultTopic: Option[String] = None,
     securityProtocol: String = "PLAINTEXT",
     sasl: KafkaSasl = KafkaSasl(),
     tls: KafkaTls = KafkaTls(),
+    producer: KafkaProducer = KafkaProducer(),
     /** raw kafka client properties, applied last */
     properties: Map[String, String] = Map.empty
 ) extends BrokerSettings {
@@ -239,6 +317,7 @@ final case class KafkaSettings(
     "security_protocol" -> securityProtocol,
     "sasl"              -> sasl.json,
     "tls"               -> tls.json,
+    "producer"          -> producer.json,
     "properties"        -> properties
   )
 }
@@ -290,6 +369,7 @@ object KafkaSettings {
       securityProtocol = protocol,
       sasl = sasl,
       tls = tls,
+      producer = f.obj("producer")(KafkaProducer.read),
       properties = f.get[Map[String, String]]("properties", Map.empty)
     )
   }
@@ -299,6 +379,46 @@ object KafkaSettings {
 // rabbitmq
 // -------------------------------------------------------------------------------------------------
 
+final case class RabbitMQExchange(name: String, `type`: String = "topic", durable: Boolean = true, autoDelete: Boolean = false, arguments: JsObject = Json.obj()) {
+  def json: JsObject = Json.obj("name" -> name, "type" -> `type`, "durable" -> durable, "auto_delete" -> autoDelete, "arguments" -> arguments)
+}
+
+/** `type`: classic, quorum, or stream (an append-only log, which replays) */
+final case class RabbitMQQueue(name: String, `type`: String = "classic", durable: Boolean = true, autoDelete: Boolean = false, arguments: JsObject = Json.obj()) {
+  def isStream: Boolean = `type` == "stream"
+  def json: JsObject    = Json.obj("name" -> name, "type" -> `type`, "durable" -> durable, "auto_delete" -> autoDelete, "arguments" -> arguments)
+}
+
+final case class RabbitMQBinding(exchange: String, queue: String, routingKey: String = "", arguments: JsObject = Json.obj()) {
+  def json: JsObject = Json.obj("exchange" -> exchange, "queue" -> queue, "routing_key" -> routingKey, "arguments" -> arguments)
+}
+
+/** what the client declares when it starts: declaring what exists already, the same way, does nothing */
+final case class RabbitMQTopology(exchanges: Seq[RabbitMQExchange] = Seq.empty, queues: Seq[RabbitMQQueue] = Seq.empty, bindings: Seq[RabbitMQBinding] = Seq.empty) {
+  def isEmpty: Boolean = exchanges.isEmpty && queues.isEmpty && bindings.isEmpty
+  def json: JsObject   = Json.obj("exchanges" -> exchanges.map(_.json), "queues" -> queues.map(_.json), "bindings" -> bindings.map(_.json))
+}
+
+object RabbitMQTopology {
+  def read(f: Fields): RabbitMQTopology = RabbitMQTopology(
+    exchanges = f.objs("exchanges") { e =>
+      val tpe = e.get[String]("type", "topic")
+      e.check("type", tpe.nonEmpty, "must not be empty")
+      RabbitMQExchange(e.requiredString("name").getOrElse(""), tpe, e.get[Boolean]("durable", true), e.get[Boolean]("auto_delete", false), e.get[JsObject]("arguments", Json.obj()))
+    },
+    queues = f.objs("queues") { q =>
+      val tpe        = q.oneOf("type", "classic", Seq("classic", "quorum", "stream"))
+      val durable    = q.get[Boolean]("durable", true)
+      val autoDelete = q.get[Boolean]("auto_delete", false)
+      if (tpe != "classic" && (!durable || autoDelete)) q.error("type", s"a $tpe queue is durable and not auto deleted")
+      RabbitMQQueue(q.requiredString("name").getOrElse(""), tpe, durable, autoDelete, q.get[JsObject]("arguments", Json.obj()))
+    },
+    bindings = f.objs("bindings") { b =>
+      RabbitMQBinding(b.requiredString("exchange").getOrElse(""), b.requiredString("queue").getOrElse(""), b.get[String]("routing_key", ""), b.get[JsObject]("arguments", Json.obj()))
+    }
+  )
+}
+
 final case class RabbitMQSettings(
     addresses: Seq[String],
     virtualHost: String = "/",
@@ -306,10 +426,14 @@ final case class RabbitMQSettings(
     password: Option[String] = None,
     defaultQueue: Option[String] = None,
     /** an address without a port gets 5671 with tls, 5672 without */
-    tls: TlsSettings = TlsSettings()
+    tls: TlsSettings = TlsSettings(),
+    topology: RabbitMQTopology = RabbitMQTopology()
 ) extends BrokerSettings {
 
   def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.RabbitMQ
+
+  /** the queues the topology declares as streams */
+  def streams: Set[String] = topology.queues.filter(_.isStream).map(_.name).toSet
 
   def json: JsObject = Json.obj(
     "addresses"     -> addresses,
@@ -317,7 +441,8 @@ final case class RabbitMQSettings(
     "username"      -> username,
     "password"      -> password,
     "default_queue" -> defaultQueue,
-    "tls"           -> tls.json
+    "tls"           -> tls.json,
+    "topology"      -> topology.json
   )
 }
 
@@ -334,7 +459,8 @@ object RabbitMQSettings {
       username = f.optString("username"),
       password = f.optString("password"),
       defaultQueue = f.optString("default_queue"),
-      tls = f.obj("tls")(TlsSettings.readFields)
+      tls = f.obj("tls")(TlsSettings.readFields),
+      topology = f.obj("topology")(RabbitMQTopology.read)
     )
   }
 }
