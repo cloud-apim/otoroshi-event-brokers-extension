@@ -138,6 +138,13 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
   through `src/test/resources/logback-test.xml`, forced with `logger.resource` because Play otherwise
   loads the `logback.xml` of the Otoroshi jar.
 
+## Documentation
+
+`documentation/` is the Docusaurus site (published to GitHub Pages by `.github/workflows/documentation.yaml`
+on each change under it). Pages are plain markdown (`.md`, read as CommonMark: `<id>` and `{...}` stay
+text); a description with a `: ` in its front matter must be quoted. A feature, an option or a setting
+that changes goes in its page too; `npm run build` in `documentation/` fails on a broken link.
+
 ## Roadmap
 
 `ROADMAP.md` holds the plan (phases, tasks, decisions taken) and what is done: tick its boxes, with the

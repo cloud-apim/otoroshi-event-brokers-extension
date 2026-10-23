@@ -85,11 +85,12 @@ Taken on 2026-10-22, not to be discussed again:
 
 ## Phase 5: documentation
 
-- [ ] Docusaurus site in `documentation/`, built and published to GitHub Pages by a workflow (the way
-  otoroshi-clevercloud-reaper does it)
-- [ ] A getting started per broker, the plugins, the options policy, the CloudEvents bindings, operations
-  (status, events, metrics)
-- [ ] Readme reduced to an overview pointing to the site (its status note about `.fail` tests is outdated)
+- [x] Docusaurus site in `documentation/`, built and published to GitHub Pages by a workflow (the way
+  otoroshi-clevercloud-reaper does it): <https://cloud-apim.github.io/otoroshi-event-brokers-extension/>
+- [x] A quickstart, a page per broker, the plugins, the options policy, the CloudEvents bindings,
+  webhooks and the integrations, operations (status, events, metrics, cluster, troubleshooting), a
+  reference (configuration, options, admin api, events, plugins)
+- [x] Readme reduced to an overview pointing to the site
 
 ## Housekeeping
 

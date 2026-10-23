@@ -1,0 +1,71 @@
+name: documentation
+
+# Builds the docusaurus site and publishes it straight to github pages as an artifact.
+# The build output is never committed: there is no built site in the repository to keep in sync.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'documentation/**'
+      - '.github/workflows/documentation.yaml'
+  pull_request:
+    paths:
+      - 'documentation/**'
+      - '.github/workflows/documentation.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# never let two deployments race; queue instead of cancelling so a merged change always ships
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: documentation
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: documentation/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      # broken links fail the build (see docusaurus.config.js)
+      - name: build
+        run: npm run build
+
+      # requires Settings -> Pages -> Source: "GitHub Actions" on the repository, once
+      - name: configure pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+
+      - name: upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: documentation/build
+
+  # pull requests build only: nothing is published until the change is on main
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: deploy to github pages
+        id: deployment
+        uses: actions/deploy-pages@v5
