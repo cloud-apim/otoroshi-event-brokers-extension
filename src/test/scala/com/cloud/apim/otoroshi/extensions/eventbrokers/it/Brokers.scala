@@ -15,8 +15,13 @@ final class Container(image: String) extends GenericContainer[Container](DockerI
  */
 object Brokers {
 
+  /** pulsar standalone takes 2g of heap and 4g of direct memory by default, kafka 1g: too much for a ci runner running them all */
+  val PulsarMemory = "-Xms256m -Xmx512m -XX:MaxDirectMemorySize=512m"
+  val KafkaMemory  = "-Xms256m -Xmx512m"
+
   lazy val kafka: KafkaContainer = {
     val container = new KafkaContainer(DockerImageName.parse("apache/kafka:3.8.0"))
+    container.withEnv("KAFKA_HEAP_OPTS", KafkaMemory)
     container.start()
     container
   }
@@ -29,6 +34,7 @@ object Brokers {
 
   lazy val pulsar: PulsarContainer = {
     val container = new PulsarContainer(DockerImageName.parse("apachepulsar/pulsar:4.0.5"))
+    container.withEnv("PULSAR_MEM", PulsarMemory)
     container.start()
     container
   }

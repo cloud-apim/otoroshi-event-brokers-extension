@@ -144,7 +144,8 @@ object TlsBrokers {
       "KAFKA_SSL_TRUSTSTORE_TYPE"                      -> "PKCS12",
       "KAFKA_SSL_TRUSTSTORE_CREDENTIALS"               -> "password",
       "KAFKA_SSL_CLIENT_AUTH"                          -> "required",
-      "CLUSTER_ID"                                     -> "4L6g3nShT-eMCtK--X86sw"
+      "CLUSTER_ID"                                     -> "4L6g3nShT-eMCtK--X86sw",
+      "KAFKA_HEAP_OPTS"                                -> Brokers.KafkaMemory
     ).foreach((k, v) => container.withEnv(k, v))
     container.waitingFor(Wait.forLogMessage(".*Kafka Server started.*", 1))
     container.start()
@@ -153,6 +154,7 @@ object TlsBrokers {
 
   lazy val pulsar: PulsarContainer = {
     val container = new PulsarContainer(DockerImageName.parse("apachepulsar/pulsar:4.0.5"))
+    container.withEnv("PULSAR_MEM", Brokers.PulsarMemory)
     container.withCopyToContainer(text(Pki.ca.certPem), "/pulsar/tls/ca.pem")
     container.withCopyToContainer(text(Pki.server.chainPem), "/pulsar/tls/server.pem")
     container.withCopyToContainer(text(Pki.server.keyPem), "/pulsar/tls/server-key.pem")

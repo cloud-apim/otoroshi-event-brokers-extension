@@ -56,6 +56,7 @@ object AuthBrokers {
       "log.dirs"                                                 -> "/tmp/kraft-logs"
     ).map((k, v) => s"$k=$v").mkString("\n")
     container.withCopyToContainer(text(properties), "/tmp/sasl.properties")
+    container.withEnv("KAFKA_HEAP_OPTS", Brokers.KafkaMemory)
     // the scram credentials are written with the storage, before the broker starts
     container.withCommand(
       "bash",
@@ -93,7 +94,8 @@ object AuthBrokers {
       // what the broker uses to talk to itself
       "brokerClientAuthenticationPlugin"    -> "org.apache.pulsar.client.impl.auth.AuthenticationToken",
       "brokerClientAuthenticationParameters" -> s"token:${token("admin")}",
-      "PULSAR_PREFIX_clusterName"           -> "standalone"
+      "PULSAR_PREFIX_clusterName"           -> "standalone",
+      "PULSAR_MEM"                          -> Brokers.PulsarMemory
     ).foreach((k, v) => container.withEnv(k, v))
     container.withCommand("/bin/bash", "-c", "/pulsar/bin/apply-config-from-env.py /pulsar/conf/standalone.conf && bin/pulsar standalone --no-functions-worker -nss")
     container.withExposedPorts(6650)
