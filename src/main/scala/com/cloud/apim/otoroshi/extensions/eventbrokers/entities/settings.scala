@@ -280,6 +280,10 @@ object KafkaSettings {
     if (tls.keystorePath.isDefined != tls.truststorePath.isDefined || (tls.keystorePath.isDefined && tls.storePassword.isEmpty)) {
       f.error("tls", "keystore_path, truststore_path and store_password go together")
     }
+    if (tls.tls.trustAll) f.error("tls.trust_all", "kafka cannot trust every certificate: give the certificate of its ca in trusted_certs")
+    if (tls.keystorePath.isDefined && (tls.tls.clientCerts.nonEmpty || tls.tls.trustedCerts.nonEmpty)) {
+      f.error("tls", "the certificates come from the store (client_certs, trusted_certs) or from files (keystore_path, truststore_path), not both")
+    }
     KafkaSettings(
       bootstrapServers = servers,
       defaultTopic = f.optString("default_topic"),
@@ -300,7 +304,9 @@ final case class RabbitMQSettings(
     virtualHost: String = "/",
     username: Option[String] = None,
     password: Option[String] = None,
-    defaultQueue: Option[String] = None
+    defaultQueue: Option[String] = None,
+    /** an address without a port gets 5671 with tls, 5672 without */
+    tls: TlsSettings = TlsSettings()
 ) extends BrokerSettings {
 
   def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.RabbitMQ
@@ -310,7 +316,8 @@ final case class RabbitMQSettings(
     "virtual_host"  -> virtualHost,
     "username"      -> username,
     "password"      -> password,
-    "default_queue" -> defaultQueue
+    "default_queue" -> defaultQueue,
+    "tls"           -> tls.json
   )
 }
 
@@ -326,7 +333,8 @@ object RabbitMQSettings {
       virtualHost = f.get[String]("virtual_host", "/"),
       username = f.optString("username"),
       password = f.optString("password"),
-      defaultQueue = f.optString("default_queue")
+      defaultQueue = f.optString("default_queue"),
+      tls = f.obj("tls")(TlsSettings.readFields)
     )
   }
 }
@@ -446,8 +454,9 @@ final case class RedisSettings(
     mode: String = "pubsub",
     defaultChannel: Option[String] = None,
     streams: RedisStreamsSettings = RedisStreamsSettings(),
+    /** on with `enabled`, or with a `rediss://` uri */
+    tls: TlsSettings = TlsSettings(),
     startTls: Boolean = false,
-    verifyPeer: Boolean = true,
     ioThreadPoolSize: Option[Int] = None,
     computationThreadPoolSize: Option[Int] = None
 ) extends BrokerSettings {
@@ -456,6 +465,8 @@ final case class RedisSettings(
 
   def isStreams: Boolean = mode == "streams"
 
+  def usesTls: Boolean = tls.enabled || uri.trim.toLowerCase.startsWith("rediss:")
+
   def json: JsObject = Json.obj(
     "uri"                          -> uri,
     "username"                     -> username,
@@ -463,7 +474,7 @@ final case class RedisSettings(
     "mode"                         -> mode,
     "default_channel"              -> defaultChannel,
     "streams"                      -> streams.json,
-    "tls"                          -> Json.obj("start_tls" -> startTls, "verify_peer" -> verifyPeer),
+    "tls"                          -> (tls.json ++ Json.obj("start_tls" -> startTls)),
     "io_thread_pool_size"          -> ioThreadPoolSize,
     "computation_thread_pool_size" -> computationThreadPoolSize
   )
@@ -473,7 +484,7 @@ object RedisSettings {
   def read(json: JsObject): Either[Seq[String], RedisSettings] = Fields.read(json) { f =>
     val uri                = f.requiredString("uri").getOrElse("")
     f.check("uri", uri.isEmpty || Try(RedisURI.create(uri)).isSuccess, "is not a redis uri")
-    val (startTls, verifyPeer) = f.obj("tls")(t => (t.get[Boolean]("start_tls", false), t.get[Boolean]("verify_peer", true)))
+    val (tls, startTls)    = f.obj("tls")(t => (TlsSettings.readFields(t), t.get[Boolean]("start_tls", false)))
     val streams            = f.obj("streams") { s =>
       // 0: no limit, what an emptied form field sends
       val maxLength = s.opt[Long]("max_length")
@@ -497,8 +508,8 @@ object RedisSettings {
       mode = f.oneOf("mode", "pubsub", Seq("pubsub", "streams")),
       defaultChannel = f.optString("default_channel"),
       streams = streams,
+      tls = tls,
       startTls = startTls,
-      verifyPeer = verifyPeer,
       ioThreadPoolSize = f.opt[Int]("io_thread_pool_size"),
       computationThreadPoolSize = f.opt[Int]("computation_thread_pool_size")
     )
@@ -610,7 +621,8 @@ final case class ArtemisSettings(
     /** how many times the client reconnects on its own after losing the broker: -1 forever, 0 never */
     reconnectAttempts: Int = -1,
     /** how long a call to the broker (a send, a query) may wait for its answer */
-    callTimeoutMs: Long = 10000L
+    callTimeoutMs: Long = 10000L,
+    tls: TlsSettings = TlsSettings()
 ) extends BrokerSettings {
 
   def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.Artemis
@@ -625,7 +637,8 @@ final case class ArtemisSettings(
     "duplicate_detection"  -> duplicateDetection,
     "consumer_window_size" -> consumerWindowSize,
     "reconnect_attempts"   -> reconnectAttempts,
-    "call_timeout_ms"      -> callTimeoutMs
+    "call_timeout_ms"      -> callTimeoutMs,
+    "tls"                  -> tls.json
   )
 }
 
@@ -650,7 +663,8 @@ object ArtemisSettings {
       duplicateDetection = f.get[Boolean]("duplicate_detection", false),
       consumerWindowSize = window,
       reconnectAttempts = retries,
-      callTimeoutMs = timeout
+      callTimeoutMs = timeout,
+      tls = f.obj("tls")(TlsSettings.readFields)
     )
   }
 }

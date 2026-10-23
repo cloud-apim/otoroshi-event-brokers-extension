@@ -9,9 +9,7 @@ import org.apache.pekko.stream.scaladsl.Sink
 import org.testcontainers.containers.wait.strategy.Wait
 import otoroshi.env.Env
 import otoroshi.models.EntityLocation
-import play.api.libs.json.Json
 
-import java.net.ServerSocket
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
@@ -30,12 +28,7 @@ class MqttReconnectSuite extends munit.FunSuite {
 
   import Gateway.{await, eventually, uniq}
 
-  def freePort(): Int = {
-    val socket = new ServerSocket(0)
-    val port   = socket.getLocalPort
-    socket.close()
-    port
-  }
+  def freePort(): Int = DockerSupport.freePort()
 
   def mosquitto(port: Int): FixedPortContainer = {
     val container = new FixedPortContainer("eclipse-mosquitto:2.0.21")

@@ -17,7 +17,6 @@ import org.apache.pekko.stream.scaladsl.{Keep, Source}
 import org.apache.pekko.stream.{Materializer, QueueOfferResult}
 import org.apache.pekko.util.ByteString
 import otoroshi.env.Env
-import otoroshi.events.KafkaSettings.kafkaSettings
 import otoroshi.utils.syntax.implicits.*
 import play.api.libs.json.{JsObject, Json}
 
@@ -31,19 +30,75 @@ import scala.jdk.FutureConverters.*
 import scala.util.Try
 import scala.util.control.NonFatal
 
+object KafkaBrokerClient {
+
+  private def quoted(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+  private def loginModule(mechanism: String): String = mechanism match {
+    case "PLAIN"                         => "org.apache.kafka.common.security.plain.PlainLoginModule"
+    case m if m.startsWith("SCRAM-")     => "org.apache.kafka.common.security.scram.ScramLoginModule"
+    case "OAUTHBEARER"                   => "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule"
+    case _                               => "com.sun.security.auth.module.Krb5LoginModule"
+  }
+
+  /**
+   * the client properties of the security protocol: sasl, and tls with the certificates of the store
+   * as pem (kafka reads them inline, no file), or the key stores given as files. the raw `properties`
+   * of the connection come last
+   */
+  def properties(settings: KafkaSettings): Map[String, String] = {
+    val protocol = settings.securityProtocol
+    val sasl     =
+      if (!protocol.startsWith("SASL_")) Map.empty
+      else
+        Map(
+          "sasl.mechanism"   -> settings.sasl.mechanism,
+          "sasl.jaas.config" -> settings.sasl.jaasConfig.getOrElse(
+            s"${loginModule(settings.sasl.mechanism)} required username=${quoted(settings.sasl.username.getOrElse(""))} password=${quoted(settings.sasl.password.getOrElse(""))};"
+          )
+        )
+    val tls      = settings.tls
+    val ssl      =
+      if (!protocol.endsWith("SSL")) Map.empty
+      else {
+        val files    = (tls.keystorePath, tls.truststorePath, tls.storePassword) match {
+          case (Some(keystore), Some(truststore), Some(password)) =>
+            Map(
+              "ssl.keystore.location"   -> keystore,
+              "ssl.keystore.password"   -> password,
+              "ssl.key.password"        -> password,
+              "ssl.truststore.location" -> truststore,
+              "ssl.truststore.password" -> password
+            )
+          case _                                                  => Map.empty
+        }
+        val store    =
+          if (!tls.tls.enabled) Map.empty
+          else {
+            val material = TlsMaterial.resolve(tls.tls)
+            material.clientChainPem.zip(material.clientKeyPem).toSeq.flatMap { (chain, key) =>
+              Seq("ssl.keystore.type" -> "PEM", "ssl.keystore.certificate.chain" -> chain, "ssl.keystore.key" -> key)
+            }.toMap ++ material.trustedPem.toSeq.flatMap(pem => Seq("ssl.truststore.type" -> "PEM", "ssl.truststore.certificates" -> pem)).toMap
+          }
+        val hostname = if (tls.tls.hostnameVerification) Map.empty else Map("ssl.endpoint.identification.algorithm" -> "")
+        files ++ store ++ hostname
+      }
+    Map("security.protocol" -> protocol) ++ sasl ++ ssl ++ settings.properties
+  }
+}
+
 class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettings, env: Env) extends EventBrokerClient with BlockingIo {
 
-  private val kconfig = settings.kafkaConfig
 
-  // kafkaSettings may block (it waits for the certificates with mtls): only computed in start
-  private lazy val properties: Map[String, String] = kafkaSettings(env, kconfig)
+  // the certificates are read from the store: only computed in start
+  private lazy val properties: Map[String, String] = KafkaBrokerClient.properties(settings)
 
   private lazy val producerSettings = ProducerSettings
     .create(env.analyticsActorSystem, new ByteArraySerializer(), new ByteArraySerializer())
     // send blocks while it looks the topic up: not for a minute, and never on otoroshi's threads
     .withProperty(ProducerConfig.MAX_BLOCK_MS_CONFIG, "10000")
     .withProperties(properties)
-    .withBootstrapServers(kconfig.servers.mkString(","))
+    .withBootstrapServers(settings.bootstrapServers.mkString(","))
 
   private lazy val consumerSettings = ConsumerSettings
     .create(env.analyticsActorSystem, new ByteArrayDeserializer(), new ByteArrayDeserializer())
@@ -51,7 +106,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
     // keeps its partitions meanwhile: the default 30 seconds would hold the next subscriber of the group
     .withStopTimeout(2.seconds)
     .withProperties(properties)
-    .withBootstrapServers(kconfig.servers.mkString(","))
+    .withBootstrapServers(settings.bootstrapServers.mkString(","))
 
   private val producerRef = new AtomicReference[Option[Producer[Array[Byte], Array[Byte]]]](None)
   private val adminRef    = new AtomicReference[Option[Admin]](None)
@@ -67,7 +122,7 @@ class KafkaBrokerClient(val config: EventBrokerConnection, settings: KafkaSettin
     rememberIo(ec)
     val adminProperties = new java.util.Properties()
     properties.foreach((k, v) => adminProperties.put(k, v))
-    adminProperties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kconfig.servers.mkString(","))
+    adminProperties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, settings.bootstrapServers.mkString(","))
     adminRef.set(Some(Admin.create(adminProperties)))
     producerRef.set(Some(producerSettings.createKafkaProducer()))
   }.flatMap(_ => healthcheck())

@@ -4,7 +4,7 @@ import com.cloud.apim.otoroshi.extensions.eventbrokers.*
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, RedisSettings}
 import io.lettuce.core.pubsub.{RedisPubSubAdapter, StatefulRedisPubSubConnection}
 import io.lettuce.core.resource.ClientResources
-import io.lettuce.core.{ClientOptions, RedisClient, RedisURI, SocketOptions}
+import io.lettuce.core.{ClientOptions, RedisClient, RedisURI, SocketOptions, SslOptions, SslVerifyMode}
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.stream.{Materializer, OverflowStrategy}
 import org.apache.pekko.util.ByteString
@@ -25,8 +25,15 @@ abstract class RedisClientSupport(settings: RedisSettings) {
 
   protected def redisUri: RedisURI = {
     val uri = RedisURI.create(settings.uri)
-    uri.setStartTls(settings.startTls)
-    uri.setVerifyPeer(settings.verifyPeer)
+    if (settings.usesTls) {
+      uri.setSsl(true)
+      uri.setStartTls(settings.startTls)
+      uri.setVerifyPeer(
+        if (settings.tls.trustAll) SslVerifyMode.NONE
+        else if (!settings.tls.hostnameVerification) SslVerifyMode.CA
+        else SslVerifyMode.FULL
+      )
+    }
     // on top of what the uri carries: the secrets can come from a vault on their own
     settings.password.foreach(p => settings.username match {
       case Some(u) => uri.setAuthentication(u, p.toCharArray)
@@ -51,10 +58,25 @@ abstract class RedisClientSupport(settings: RedisSettings) {
 
   /** blocking: connects nothing, the connections are opened from it */
   protected def startClient(): RedisClient = {
+    // the certificates of the store, in memory: none of them missing, or the start fails (and is tried again)
+    val ssl       = Option.when(settings.usesTls)(TlsMaterial.resolve(settings.tls)).map { material =>
+      SslOptions
+        .builder()
+        .jdkSslProvider()
+        .applyOnWithOpt(material.keyManagers)((b, kmf) => b.keyManager(kmf))
+        .applyOnWithOpt(material.trustManagers)((b, tmf) => b.trustManager(tmf))
+        .build()
+    }
     val resources = buildResources()
     resourcesRef.set(Some(resources))
     val client    = RedisClient.create(resources, redisUri)
-    client.setOptions(ClientOptions.builder().socketOptions(SocketOptions.builder().connectTimeout(java.time.Duration.ofSeconds(10)).build()).build())
+    client.setOptions(
+      ClientOptions
+        .builder()
+        .socketOptions(SocketOptions.builder().connectTimeout(java.time.Duration.ofSeconds(10)).build())
+        .applyOnWithOpt(ssl)((b, options) => b.sslOptions(options))
+        .build()
+    )
     clientRef.set(Some(client))
     client
   }

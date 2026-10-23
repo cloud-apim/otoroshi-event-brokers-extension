@@ -108,7 +108,11 @@ class SettingsSuite extends munit.FunSuite {
 
   test("redis and mqtt: what is checked") {
     assertError(Redis, Json.obj("uri" -> "http://r"), "uri: is not a redis uri")
-    assert(read(Redis, Json.obj("uri" -> "rediss://r:6380", "tls" -> Json.obj("verify_peer" -> false))).isRight)
+    assert(read(Redis, Json.obj("uri" -> "rediss://r:6380", "tls" -> Json.obj("hostname_verification" -> false))).isRight)
+    assertError(Redis, Json.obj("uri" -> "rediss://r:6380", "tls" -> Json.obj("verify_peer" -> false)), "tls.verify_peer: unknown field")
+    assert(RedisSettings(uri = "rediss://r:6380").usesTls)
+    assert(RedisSettings(uri = "redis://r:6379", tls = TlsSettings(enabled = true)).usesTls)
+    assert(!RedisSettings(uri = "redis://r:6379").usesTls)
     assertError(MQTT, Json.obj("host" -> "m", "port" -> 0), "port: must be between 1 and 65535")
     assertError(MQTT, Json.obj("host" -> "m", "default_qos" -> 3), "default_qos: must be between 0 and 2")
     assertError(MQTT, Json.obj("host" -> "m", "client_id_prefix" -> "a-much-too-long-prefix"), "client_id_prefix: at most 14")
@@ -132,6 +136,23 @@ class SettingsSuite extends munit.FunSuite {
     assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("claim_min_idle_ms" -> -1)), "streams.claim_min_idle_ms: must not be negative")
     assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("data_field" -> "")), "streams.data_field: must not be empty")
     assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("maxlen" -> 10)), "streams.maxlen: unknown field")
+  }
+
+  test("tls, the same everywhere") {
+    val tls = Json.obj("enabled" -> true, "client_certs" -> Json.arr("client"), "trusted_certs" -> Json.arr("ca"), "hostname_verification" -> false)
+    val expected = TlsSettings(enabled = true, clientCerts = Seq("client"), trustedCerts = Seq("ca"), hostnameVerification = false)
+    assertEquals(read(RabbitMQ, Json.obj("addresses" -> Json.arr("r"), "tls" -> tls)).map(_.asInstanceOf[RabbitMQSettings].tls), Right(expected))
+    assertEquals(read(Artemis, Json.obj("url" -> "tcp://a:61617", "tls" -> tls)).map(_.asInstanceOf[ArtemisSettings].tls), Right(expected))
+    assertEquals(read(Redis, Json.obj("uri" -> "redis://r", "tls" -> tls)).map(_.asInstanceOf[RedisSettings].tls), Right(expected))
+    assertEquals(read(MQTT, Json.obj("host" -> "m", "tls" -> tls)).map(_.asInstanceOf[MqttSettings].tls), Right(expected))
+    // kafka has no trust-all, and its certificates come from the store or from files
+    val kafka = Json.obj("bootstrap_servers" -> Json.arr("k:9093"), "security_protocol" -> "SSL")
+    assertError(Kafka, kafka ++ Json.obj("tls" -> Json.obj("enabled" -> true, "trust_all" -> true)), "tls.trust_all: kafka cannot trust every certificate")
+    assertError(
+      Kafka,
+      kafka ++ Json.obj("tls" -> Json.obj("enabled" -> true, "trusted_certs" -> Json.arr("ca"), "keystore_path" -> "/k", "truststore_path" -> "/t", "store_password" -> "p")),
+      "tls: the certificates come from the store"
+    )
   }
 
   test("artemis") {

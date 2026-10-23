@@ -32,7 +32,8 @@ import scala.util.control.NonFatal
 
 object PulsarBroker {
 
-  def client(_env: otoroshi.env.Env, settings: PulsarSettings): JPulsarClient = {
+  /** the client, and the tls files it reads (to delete once it is closed) */
+  def client(settings: PulsarSettings): (JPulsarClient, Option[TlsFiles]) = {
     val auth: Authentication = settings.auth match {
       case PulsarAuth.Basic(username, password) =>
         new AuthenticationBasic().seffectOn(_.configure(new AuthenticationDataBasic(username, password).getCommandData))
@@ -40,22 +41,23 @@ object PulsarBroker {
       case PulsarAuth.Disabled                  => new AuthenticationDisabled()
     }
     val builder = JPulsarClient.builder().serviceUrl(settings.serviceUrl).authentication(auth)
-    if (settings.tls.enabled) {
-      val mtls = settings.tls.mtlsConfig
+    // the pulsar client reads pem files: the certificates of the store go in files of its own
+    val files   = Option.when(settings.tls.enabled)(TlsMaterial.resolve(settings.tls).files())
+    files.foreach { tls =>
       builder
-        .enableTlsHostnameVerification(settings.tls.hostnameVerification)
+        .enableTlsHostnameVerification(settings.tls.hostnameVerification && !settings.tls.trustAll)
         .allowTlsInsecureConnection(settings.tls.trustAll)
-      if (settings.tls.clientCerts.nonEmpty || settings.tls.trustedCerts.nonEmpty) {
-        val (_, jks, password) = mtls.toJKS(using _env)
-        builder
-          .tlsTrustStoreType("JKS")
-          .tlsTrustStorePassword(password)
-          .tlsTrustCertsFilePath(jks.getAbsolutePath)
-          .useKeyStoreTls(true)
-      }
-      settings.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
+      tls.trustedPem.foreach(file => builder.tlsTrustCertsFilePath(file.getAbsolutePath))
+      tls.clientChainPem.foreach(file => builder.tlsCertificateFilePath(file.getAbsolutePath))
+      tls.clientKeyPem.foreach(file => builder.tlsKeyFilePath(file.getAbsolutePath))
     }
-    builder.build()
+    settings.tlsTrustCertsFilePath.foreach(builder.tlsTrustCertsFilePath)
+    try (builder.build(), files)
+    catch {
+      case NonFatal(e) =>
+        files.foreach(_.delete())
+        throw e
+    }
   }
 }
 
@@ -70,6 +72,7 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
   private val maxProducers = 64
 
   private val nativeRef = new AtomicReference[Option[JPulsarClient]](None)
+  private val filesRef  = new AtomicReference[Option[TlsFiles]](None)
 
   private val producers = new java.util.LinkedHashMap[String, Future[Producer[Array[Byte]]]](16, 0.75f, true)
 
@@ -82,7 +85,9 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
   private def topicOf(name: Option[String]): String = settings.fullTopic(name.orElse(settings.defaultTopic).getOrElse(throw noTopic))
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    nativeRef.set(Some(PulsarBroker.client(env, settings)))
+    val (native, files) = PulsarBroker.client(settings)
+    nativeRef.set(Some(native))
+    filesRef.set(files)
   }.flatMap(_ => healthcheck())
 
   // building the client connects nothing: looking the default topic up needs the broker (without
@@ -102,6 +107,7 @@ class PulsarBrokerClient(val config: EventBrokerConnection, settings: PulsarSett
       producers.clear()
     }
     nativeRef.getAndSet(None).foreach(c => Try(c.close()))
+    filesRef.getAndSet(None).foreach(_.delete())
   }
 
   /** the producer of the topic, created on first use */

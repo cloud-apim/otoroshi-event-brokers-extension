@@ -316,6 +316,21 @@ A connection whose stored settings are wrong (written by hand, or in the format 
 stays listed so that it can be fixed; it is `unavailable` with the errors, and is not tried again
 until its settings change.
 
+**TLS** is set the same way on every kind, with certificates of the Otoroshi certificate store:
+
+```json
+"tls": { "enabled": true, "client_certs": ["my-client-cert"], "trusted_certs": ["my-ca"], "trust_all": false, "hostname_verification": true }
+```
+
+`client_certs` is who the gateway is (the first one, with its private key: mutual TLS), `trusted_certs`
+whom it trusts (a CA, or the certificates of the brokers); without them, the JVM's default trust.
+Certificates are named by id or by subject DN. One that is not in the store keeps the connection
+`unavailable`, saying which, and the connection is tried again as the store fills up. `trust_all`
+trusts any broker (for tests only; not on Kafka), `hostname_verification` checks that the broker's
+certificate holds the name it was reached with. The clients that take key and trust managers (RabbitMQ,
+Redis, MQTT) get them in memory, Kafka gets the certificates as inline PEM properties, Pulsar and
+Artemis get files of their own, deleted when the client closes.
+
 <details>
 <summary>The settings of each kind, with their defaults</summary>
 
@@ -336,15 +351,25 @@ until its settings change.
 ```
 
 `security_protocol` is `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`; the `SASL_*` ones need a
-username and a password, or a `jaas_config`. TLS uses certificates of the Otoroshi store
-(`client_certs`, `trusted_certs`: certificate ids), or keystore and truststore files. `properties` are
-raw Kafka client properties, applied last.
+username and a password (the login module of the mechanism is used), or a `jaas_config`. TLS (`SSL`,
+`SASL_SSL`) uses certificates of the Otoroshi store, or keystore and truststore files
+(`keystore_path`, `truststore_path`, `store_password`), not both. `properties` are raw Kafka client
+properties, applied last.
 
 **rabbitmq** (`addresses` is required)
 
 ```json
-{ "addresses": ["rabbit:5672"], "virtual_host": "/", "username": null, "password": null, "default_queue": null }
+{
+  "addresses": ["rabbit:5672"],
+  "virtual_host": "/",
+  "username": null,
+  "password": null,
+  "default_queue": null,
+  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true }
+}
 ```
+
+An address without a port is reached on 5671 with TLS, 5672 without.
 
 **pulsar** (`service_url` is required: `pulsar://` or `pulsar+ssl://`)
 
@@ -366,7 +391,7 @@ raw Kafka client properties, applied last.
 `{"kind": "basic", "username": "...", "password": "..."}`. Topics without a scheme are
 `persistent://<tenant>/<namespace>/<topic>`.
 
-**redis** (`uri` is required: `redis://`, `rediss://` for TLS)
+**redis** (`uri` is required: `redis://`, or `rediss://` for TLS, which `tls.enabled` turns on too)
 
 ```json
 {
@@ -382,7 +407,7 @@ raw Kafka client properties, applied last.
     "data_field": "data",
     "claim_min_idle_ms": 60000
   },
-  "tls": { "start_tls": false, "verify_peer": true },
+  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true, "start_tls": false },
   "io_thread_pool_size": null,
   "computation_thread_pool_size": null
 }
@@ -436,12 +461,13 @@ client is connected again. Every client gets its own id, the prefix and a random
   "duplicate_detection": false,
   "consumer_window_size": 1048576,
   "reconnect_attempts": -1,
-  "call_timeout_ms": 10000
+  "call_timeout_ms": 10000,
+  "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true }
 }
 ```
 
-`url` is an Artemis core url: a list of brokers (`(tcp://a:61616,tcp://b:61616)?ha=true`), and its
-netty parameters for TLS (`sslEnabled=true;trustStorePath=...`). `duplicate_detection` gives each message
+`url` is an Artemis core url: a list of brokers (`(tcp://a:61616,tcp://b:61616)?ha=true`), with its
+netty parameters; `tls` adds the TLS ones (`sslEnabled`, the key stores). `duplicate_detection` gives each message
 the source and the id of its event as duplicate id (`_AMQ_DUPL_ID`): the broker drops an event
 published twice. `consumer_window_size` is what a consumer buffers ahead, in bytes. The client
 reconnects by itself `reconnect_attempts` times (`-1`: forever); while it does, a call waits
@@ -462,6 +488,7 @@ a `400` when there is none (a publish gets a failed result for each event).
 | `it.PolicySuite`                         | what a caller may ask under the configuration of its plugin, against Kafka | docker  |
 | `it.ConnectionsSuite`                    | the connection lifecycle against a real Redis: not there yet, paused, back, settings changed, deleted | docker  |
 | `it.KafkaSuite`, `it.RabbitMQSuite`, `it.PulsarSuite`, `it.RedisSuite`, `it.RedisStreamsSuite`, `it.MqttSuite`, `it.ArtemisSuite` | an Otoroshi in the test jvm, with the extension loaded, and a real broker in a container | docker  |
+| `it.TlsSuite`                            | mutual TLS against every broker, with a test CA and certificates created in the Otoroshi store | docker  |
 | `it.MqttReconnectSuite`                  | the mqtt client alone, against a mosquitto restarted on the same port | docker  |
 
 The broker suites start their containers with [testcontainers](https://testcontainers.com/) and skip

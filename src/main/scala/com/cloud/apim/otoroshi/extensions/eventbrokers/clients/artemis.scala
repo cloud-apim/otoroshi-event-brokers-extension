@@ -38,6 +38,28 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
 
   private val locatorRef = new AtomicReference[Option[ServerLocator]](None)
   private val factoryRef = new AtomicReference[Option[ClientSessionFactory]](None)
+  private val filesRef   = new AtomicReference[Option[TlsFiles]](None)
+
+  /**
+   * the url, with the netty parameters of the tls settings: the client reads key stores from files, so
+   * the certificates of the store go in files of its own (pkcs12)
+   */
+  private def url(): String =
+    if (!settings.tls.enabled) settings.url
+    else {
+      val files  = TlsMaterial.resolve(settings.tls).files()
+      filesRef.set(Some(files))
+      val params = Seq(
+        "sslEnabled" -> "true",
+        "verifyHost" -> (settings.tls.hostnameVerification && !settings.tls.trustAll).toString,
+        "trustAll"   -> settings.tls.trustAll.toString
+      ) ++ files.keyStore.toSeq.flatMap { file =>
+        Seq("keyStorePath" -> file.getAbsolutePath, "keyStorePassword" -> files.password, "keyStoreType" -> "PKCS12")
+      } ++ files.trustStore.toSeq.flatMap { file =>
+        Seq("trustStorePath" -> file.getAbsolutePath, "trustStorePassword" -> files.password, "trustStoreType" -> "PKCS12")
+      }
+      settings.url + (if (settings.url.contains("?")) "&" else "?") + params.map((k, v) => s"$k=$v").mkString("&")
+    }
 
   /** the sessions publishing (one batch at a time each: a session is not to be shared between threads) */
   private val publishers = new ConcurrentLinkedQueue[(ClientSession, ClientProducer)]()
@@ -55,7 +77,7 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
     rememberIo(ec)
     Future {
       val locator = ActiveMQClient
-        .createServerLocator(settings.url)
+        .createServerLocator(url())
         // a send, a query or an ack waits for the broker, no more than the call timeout, even while reconnecting
         .setBlockOnDurableSend(true)
         .setBlockOnNonDurableSend(true)
@@ -106,6 +128,7 @@ class ArtemisBrokerClient(val config: EventBrokerConnection, settings: ArtemisSe
     Iterator.continually(publishers.poll()).takeWhile(_ != null).foreach(p => Try(p._1.close()))
     factoryRef.getAndSet(None).foreach(f => Try(f.close()))
     locatorRef.getAndSet(None).foreach(l => Try(l.close()))
+    filesRef.getAndSet(None).foreach(_.delete())
   }(using io)
 
   private def noAddress = new IllegalArgumentException("no address: none in the call, and the connection has no default_address")

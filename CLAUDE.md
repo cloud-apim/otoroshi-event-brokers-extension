@@ -51,6 +51,9 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   healthchecks its client periodically (rebuilds it after too many failures), and once retired closes
   its client when the `ClientLease`s handed out are released or after the grace period. Plugins only
   ever `acquire` a lease (and release it, `lease.releasing(source)`); they never build a client
+- **tls.scala** - `TlsMaterial`: what the `tls` settings of a connection name in the Otoroshi certificate
+  store (by id or dn), as key / trust managers, an `SSLContext`, pem, or files of the client's own
+  (`TlsFiles`, deleted on close). Every client gets its tls from there
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and
   `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy
@@ -112,10 +115,17 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
 - **Tests named `.fail` pin a known defect**: they pass while it is there and fail once it is fixed.
   When you fix one, remove the marker (and its comment). Check a `.fail` test fails for the reason its
   comment gives, not because of the harness.
+- `it/TlsSuite` runs every broker with mutual tls (`TlsBrokers`), with a ca and certificates made by `Pki`
+  and created in the store through the admin api.
 - `build.sbt` needs `Test / classLoaderLayeringStrategy := Flat` (classpath scanning) and the netty /
   play-json `dependencyOverrides` (Otoroshi's own overrides don't travel through its pom). Logs go
   through `src/test/resources/logback-test.xml`, forced with `logger.resource` because Play otherwise
   loads the `logback.xml` of the Otoroshi jar.
+
+## Roadmap
+
+`ROADMAP.md` holds the plan (phases, tasks, decisions taken) and what is done: tick its boxes, with the
+link of the pull request, in the pull request that does the work.
 
 ## CI and releases
 

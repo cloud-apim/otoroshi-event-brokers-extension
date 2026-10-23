@@ -10,7 +10,6 @@ import otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers.plugins.
 import play.api.libs.json.*
 import play.api.libs.ws.DefaultBodyWritables.writeableOf_String
 
-import java.net.ServerSocket
 import scala.concurrent.duration.*
 
 // deprecated, but the plain way to have a broker appear on a port chosen before it starts
@@ -41,12 +40,7 @@ class ConnectionsSuite extends BrokerSuite {
 
   def redisUri: String = s"redis://${redis.getHost}:${redis.getMappedPort(6379)}"
 
-  def freePort(): Int = {
-    val socket = new ServerSocket(0)
-    val port   = socket.getLocalPort
-    socket.close()
-    port
-  }
+  def freePort(): Int = DockerSupport.freePort()
 
   /** how many clients redis has, ours included */
   def connectedClients(): Int = {

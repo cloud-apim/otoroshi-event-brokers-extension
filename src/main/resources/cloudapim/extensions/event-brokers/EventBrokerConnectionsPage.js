@@ -132,7 +132,6 @@ class EventBrokerConnectionsPage extends Component {
     'settings.streams.data_field': input('string', 'Data field', { help: 'The field of an entry holding the data, the others are its headers' }),
     'settings.streams.claim_min_idle_ms': input('number', 'Claim after (ms)', { help: 'An entry left unacked that long by a member of a group goes to another one. 0: never' }),
     'settings.tls.start_tls': input('bool', 'STARTTLS'),
-    'settings.tls.verify_peer': input('bool', 'Verify the server certificate'),
     // artemis
     'settings.url': input('string', 'URL', { placeholder: 'tcp://host:61616', help: 'A core url, with its parameters: (tcp://a:61616,tcp://b:61616)?ha=true, sslEnabled=true, ...' }),
     'settings.default_address': input('string', 'Default address', { help: 'Used when a call names no address' }),
@@ -235,7 +234,8 @@ class EventBrokerConnectionsPage extends Component {
           '>>>Authentication',
           'settings.username',
           'settings.password',
-        ]);
+          '>>>TLS',
+        ], tls);
       case 'pulsar':
         return head.concat([
           'settings.service_url',
@@ -262,9 +262,7 @@ class EventBrokerConnectionsPage extends Component {
           'settings.username',
           'settings.password',
           '>>>TLS',
-          'settings.tls.start_tls',
-          'settings.tls.verify_peer',
-        ]);
+        ], tls, ['settings.tls.start_tls']);
       case 'artemis':
         return head.concat([
           'settings.url',
@@ -275,6 +273,8 @@ class EventBrokerConnectionsPage extends Component {
           '>>>Authentication',
           'settings.username',
           'settings.password',
+          '>>>TLS',
+        ], tls, [
           '>>>Client',
           'settings.consumer_window_size',
           'settings.reconnect_attempts',

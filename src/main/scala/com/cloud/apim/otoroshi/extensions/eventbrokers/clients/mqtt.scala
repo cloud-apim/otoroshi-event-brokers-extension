@@ -25,12 +25,9 @@ import otoroshi.env.Env
 import otoroshi.utils.syntax.implicits.*
 import play.api.libs.json.{JsObject, Json}
 
-import java.io.FileInputStream
-import java.security.KeyStore
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
-import javax.net.ssl.{KeyManagerFactory, TrustManagerFactory}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters.*
@@ -38,24 +35,6 @@ import scala.jdk.FutureConverters.*
 import scala.jdk.OptionConverters.*
 import scala.util.Try
 import scala.util.control.NonFatal
-
-/** `trust_all`: the client only takes a factory, so a factory of a manager that trusts anything */
-private[clients] object TrustAll {
-  private val manager = new javax.net.ssl.X509TrustManager {
-    override def checkClientTrusted(chain: Array[java.security.cert.X509Certificate], authType: String): Unit = ()
-    override def checkServerTrusted(chain: Array[java.security.cert.X509Certificate], authType: String): Unit = ()
-    override def getAcceptedIssuers: Array[java.security.cert.X509Certificate] = Array.empty
-  }
-  val factory: TrustManagerFactory = new TrustManagerFactory(
-    new javax.net.ssl.TrustManagerFactorySpi {
-      override def engineInit(ks: KeyStore): Unit = ()
-      override def engineInit(spec: javax.net.ssl.ManagerFactoryParameters): Unit = ()
-      override def engineGetTrustManagers(): Array[javax.net.ssl.TrustManager] = Array(manager)
-    },
-    new java.security.Provider("cloud-apim-trust-all", "1.0", "trusts every certificate") {},
-    "trust-all"
-  ) {}
-}
 
 /** what the client gets from the broker, whatever the version */
 private[clients] final case class MqttIncoming(
@@ -219,33 +198,14 @@ class MQTTBrokerClient(val config: EventBrokerConnection, settings: MqttSettings
     name.orElse(settings.defaultTopic).getOrElse(throw new IllegalArgumentException("no topic: none in the call, and the connection has no default_topic"))
 
   /** tls with the certificates of the otoroshi store, or the default trust of the jvm */
-  private def sslConfig()(using env: Env): MqttClientSslConfig = {
-    val tls     = settings.tls
-    val builder = MqttClientSslConfig.builder()
-    if (tls.trustAll) {
-      builder.trustManagerFactory(TrustAll.factory)
-    } else if (tls.clientCerts.nonEmpty || tls.trustedCerts.nonEmpty) {
-      val (keystore, truststore, password) = tls.mtlsConfig.toJKS(using env)
-      def load(file: java.io.File): KeyStore = {
-        val store = KeyStore.getInstance("JKS")
-        val in    = new FileInputStream(file)
-        try store.load(in, password.toCharArray)
-        finally in.close()
-        store
-      }
-      if (tls.trustedCerts.nonEmpty) {
-        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm)
-        tmf.init(load(truststore))
-        builder.trustManagerFactory(tmf)
-      }
-      if (tls.clientCerts.nonEmpty) {
-        val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm)
-        kmf.init(load(keystore), password.toCharArray)
-        builder.keyManagerFactory(kmf)
-      }
-    }
-    if (!tls.hostnameVerification) builder.hostnameVerifier((_, _) => true)
-    builder.build()
+  private def sslConfig(): MqttClientSslConfig = {
+    val material = TlsMaterial.resolve(settings.tls)
+    MqttClientSslConfig
+      .builder()
+      .applyOnWithOpt(material.trustManagers)((b, tmf) => b.trustManagerFactory(tmf))
+      .applyOnWithOpt(material.keyManagers)((b, kmf) => b.keyManagerFactory(kmf))
+      .applyOnIf(!settings.tls.hostnameVerification || settings.tls.trustAll)(_.hostnameVerifier((_, _) => true))
+      .build()
   }
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {

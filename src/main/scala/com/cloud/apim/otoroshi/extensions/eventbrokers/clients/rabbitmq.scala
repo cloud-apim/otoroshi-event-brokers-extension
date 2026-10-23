@@ -51,6 +51,11 @@ class RabbitMqBrokerClient(val config: EventBrokerConnection, settings: RabbitMQ
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
     rememberIo(ec)
+    if (settings.tls.enabled) {
+      // the certificates of the store, in memory: none of them missing, or the start fails (and is tried again)
+      factory.useSslProtocol(TlsMaterial.resolve(settings.tls).sslContext)
+      if (settings.tls.hostnameVerification && !settings.tls.trustAll) factory.enableHostnameVerification()
+    }
     val connection = factory.newConnection(settings.addresses.map(s => Address.parseAddress(s)).toArray)
     connectionRef.set(Some(connection))
     publisherRef.set(Some(newPublisher(connection)))
