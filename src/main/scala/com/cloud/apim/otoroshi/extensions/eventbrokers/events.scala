@@ -1,6 +1,6 @@
 package com.cloud.apim.otoroshi.extensions.eventbrokers
 
-import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.EventBrokerConnection
+import com.cloud.apim.otoroshi.extensions.eventbrokers.entities.{EventBrokerConnection, EventBrokerWebhook}
 import org.joda.time.DateTime
 import otoroshi.env.Env
 import otoroshi.events.{AlertEvent, AnalyticEvent}
@@ -75,5 +75,31 @@ final case class EventBrokerConnectionUnavailableAlert(
     "previous_state" -> previous.state.name,
     "error"          -> current.error,
     "status"         -> current.json
+  )
+}
+
+/** Sent when a webhook gives an event up: refused by its endpoint, or failed every attempt, and no dead letters took it. */
+final case class EventBrokerWebhookDeliveryFailedAlert(webhook: EventBrokerWebhook, event: CloudEvent, attempts: Int, reason: String, env: Env) extends AlertEvent {
+
+  val `@id`: String                          = env.snowflakeGenerator.nextIdStr()
+  val `@timestamp`: DateTime                 = DateTime.now()
+  override def `@service`: String            = webhook.name
+  override def `@serviceId`: String          = webhook.id
+  override def fromOrigin: Option[String]    = None
+  override def fromUserAgent: Option[String] = None
+
+  override def toJson(using _env: Env): JsValue = Json.obj(
+    "@id"        -> `@id`,
+    "@timestamp" -> play.api.libs.json.JodaWrites.JodaDateTimeNumberWrites.writes(`@timestamp`),
+    "@type"      -> `@type`,
+    "@product"   -> _env.eventsName,
+    "@serviceId" -> `@serviceId`,
+    "@service"   -> `@service`,
+    "@env"       -> _env.env,
+    "alert"      -> "EventBrokerWebhookDeliveryFailed",
+    "webhook"    -> Json.obj("id" -> webhook.id, "name" -> webhook.name, "connection" -> webhook.connection, "url" -> webhook.endpoint.url),
+    "event"      -> Json.obj("id" -> event.id, "source" -> event.source, "type" -> event.`type`),
+    "attempts"   -> attempts,
+    "reason"     -> reason
   )
 }

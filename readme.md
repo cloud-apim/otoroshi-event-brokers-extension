@@ -229,18 +229,86 @@ curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/
 that are not connected yet. In a cluster each node has its own clients: the admin API answers for the
 node serving it.
 
+**Trying a connection** (also from its page in the backoffice, *Try it*): publish a test event, or
+peek at what a topic or a queue holds. The query string holds the options of the call, the ones a
+route takes:
+
+```bash
+curl -X POST 'http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/connections/<id>/_publish?topic=orders' \
+  -u admin-api-apikey-id:admin-api-apikey-secret -H 'Content-Type: application/json' -d '{"hello":"world"}'
+curl 'http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/connections/<id>/_peek?topic=orders&from=earliest&take=10&within=3000' -u ...
+```
+
+A body holding a CloudEvent (`specversion`), or an array of them, is published as it is; anything else
+is the data of a new event. A peek never acks: what it reads from a queue (RabbitMQ, an anycast
+address of Artemis) or in a group goes back where it was.
+
+### Webhooks
+
+A webhook pushes the events of a connection to an HTTP endpoint: a subscription (the options a
+consumer route takes), an endpoint, a retry policy and, optionally, dead letters.
+
+```json
+{
+  "id": "webhook_...", "name": "orders to billing", "enabled": true,
+  "connection": "connection_...",
+  "subscription": { "topic": "orders", "from": "earliest" },
+  "endpoint": {
+    "url": "https://billing.internal/events", "method": "POST", "headers": {}, "timeout_ms": 10000,
+    "mode": "structured", "secret": "${vault://local/billing/webhook-secret}",
+    "tls": { "enabled": false, "client_certs": [], "trusted_certs": [], "trust_all": false, "hostname_verification": true }
+  },
+  "retry": { "max_attempts": 5, "initial_backoff_ms": 1000, "max_backoff_ms": 30000 },
+  "max_in_flight": 1,
+  "dead_letter": { "connection": null, "options": { "topic": "orders-dlq" } }
+}
+```
+
+- `mode` is how an event goes over HTTP (the CloudEvents HTTP binding): `structured` (the event as
+  `application/cloudevents+json`), `binary` (the attributes in `ce-` headers, the data as the body) or
+  `raw` (the data alone). Every request carries `X-Event-Brokers-Webhook` (its id) and
+  `X-Event-Brokers-Attempt`; with a `secret`, `X-Event-Brokers-Signature: sha256=<hmac of the body>`.
+- A `2xx` delivers the event, and only then is it acked: what was not delivered is delivered again.
+  A `408`, `429`, `5xx` or no answer is tried again, waiting twice as long each time (and at least what
+  a `Retry-After` asks), `max_attempts` times in all. Any other `4xx` is a refusal, not tried again.
+- An event given up on goes to the `dead_letter` connection (the webhook's own one by default), with
+  the options of the publish, and the extensions `webhookid`, `webhookerror` and `webhookattempts`.
+  Without dead letters, an `EventBrokerWebhookDeliveryFailed` alert is sent. Either way, it is acked.
+- `max_in_flight` deliveries at once: `1` keeps the order of the events.
+- Unless the subscription says otherwise, a webhook reads in a group of its own
+  (`otoroshi-webhook-<id>`) where the broker has groups, and acks at least once where it can acknowledge.
+
+**One node at a time delivers a webhook.** Alone, Otoroshi delivers them all. In a cluster, the nodes
+decide in a Redis they share (`webhooks.redis.uri`, through Otoroshi's stateful clients): the one
+holding the lock of a webhook delivers it, and renews its lock; once it stops (it goes away, it lost
+the Redis), another one takes over after `webhooks.lock-ttl`, where the group of the webhook stopped.
+A cluster without that Redis delivers no webhook: the status says why.
+
+```bash
+curl http://otoroshi-api.oto.tools:8080/api/extensions/cloud-apim/event-brokers/webhooks/_status -u ...
+```
+
+```json
+{ "id": "webhook_...", "name": "orders to billing", "delivering": true, "owner": "node-1-3f2a9c1b",
+  "delivered": 1204, "retried": 3, "failed": 1, "dead_lettered": 1, "last_delivery_at": 1792663181364,
+  "last_error": { "at": 1792663171364, "message": "could not deliver event '...' after 5 attempt(s): ..." } }
+```
+
 ### Analytics events and metrics
 
 | Event                                | `@type` / `alert`                                | Sent when                                   |
 |--------------------------------------|--------------------------------------------------|---------------------------------------------|
 | `EventBrokerConnectionEvent`         | `EventBrokerConnectionEvent`                     | a connection changes state on a node        |
 | `EventBrokerConnectionUnavailableAlert` | `AlertEvent` / `EventBrokerConnectionUnavailable` | a connection cannot connect, or loses its broker |
+| `EventBrokerWebhookDeliveryFailedAlert` | `AlertEvent` / `EventBrokerWebhookDeliveryFailed` | a webhook gives an event up, and no dead letters took it |
 
-Both carry the `connection` (`id`, `name`, `kind`), the `previous_state` and the `status` above. One alert
-per outage, not one per attempt.
+The first two carry the `connection` (`id`, `name`, `kind`), the `previous_state` and the `status` above:
+one alert per outage, not one per attempt. The webhook alert carries the `webhook`, the `event` (`id`,
+`source`, `type`), the `attempts` and the `reason`.
 
 Metrics, when Otoroshi's metrics are enabled: `cloud-apim.event-brokers.connections.<state>` (how many
-connections of the node are in each state) and `cloud-apim.event-brokers.connections.transitions.<state>`.
+connections of the node are in each state) and `cloud-apim.event-brokers.connections.transitions.<state>`;
+`cloud-apim.event-brokers.webhooks.<id>.delivered`, `.retried`, `.failed`, `.dead_lettered`.
 
 ## Requirements
 
@@ -282,6 +350,18 @@ otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.conn
 }
 ```
 
+And the webhooks:
+
+```hocon
+otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.webhooks {
+  enabled = true
+  # required in a cluster: the redis the nodes share to decide which one delivers each webhook
+  redis.uri = "redis://shared-redis:6379"   # CLOUD_APIM_EXTENSIONS_EVENT_BROKERS_WEBHOOKS_REDIS_URI
+  lock-ttl = 15s
+  node-kinds = ["leader", "worker"]
+}
+```
+
 ## Getting started
 
 1. Open **Event broker connections** in the Otoroshi backoffice and create a connection to your broker.
@@ -304,6 +384,7 @@ otoroshi.admin-extensions.configurations.cloud-apim_extensions_eventbrokers.conn
 | Entity                  | Kind                                                          | Admin API                                                                    |
 |-------------------------|---------------------------------------------------------------|------------------------------------------------------------------------------|
 | Event broker connection | `event-brokers.extensions.cloud-apim.com/EventBrokerConnection` | `/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-connections` |
+| Event broker webhook    | `event-brokers.extensions.cloud-apim.com/EventBrokerWebhook`    | `/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-webhooks`    |
 
 A connection is a `kind` and its `settings`:
 

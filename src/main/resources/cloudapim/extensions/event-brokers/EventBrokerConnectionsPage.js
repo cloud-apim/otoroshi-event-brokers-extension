@@ -33,6 +33,65 @@ function connectionStatusBadge(status) {
   );
 }
 
+// publishes a test event, or peeks at what a topic or a queue holds, through the saved connection
+class ConnectionTryout extends Component {
+  state = { options: '{\n  "topic": "events"\n}', data: '{\n  "hello": "world"\n}', result: null, running: false };
+
+  query = (extra) => {
+    const options = { ...JSON.parse(this.state.options || '{}'), ...extra };
+    return Object.keys(options)
+      .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(options[k])}`)
+      .join('&');
+  };
+
+  call = (path, init) => {
+    const id = (this.props.rawValue || {}).id;
+    let query;
+    try {
+      query = this.query(path === '_peek' ? { take: 10, within: 3000 } : {});
+    } catch (e) {
+      this.setState({ result: `the options are not json: ${e.message}` });
+      return;
+    }
+    this.setState({ running: true, result: null });
+    fetch(`/bo/api/proxy/api/extensions/cloud-apim/event-brokers/connections/${id}/${path}?${query}`, {
+      credentials: 'include',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      ...init,
+    })
+      .then((r) => r.text().then((text) => `${r.status}\n${(() => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return text; } })()}`))
+      .then((result) => this.setState({ result, running: false }))
+      .catch((e) => this.setState({ result: e.message, running: false }));
+  };
+
+  render() {
+    const row = (label, content) =>
+      React.createElement('div', { className: 'row mb-3' }, [
+        React.createElement('label', { key: 'l', className: 'col-xs-12 col-sm-2 col-form-label' }, label),
+        React.createElement('div', { key: 'c', className: 'col-sm-10' }, content),
+      ]);
+    const area = (key, rows) =>
+      React.createElement('textarea', {
+        className: 'form-control',
+        rows,
+        style: { fontFamily: 'monospace' },
+        value: this.state[key],
+        onChange: (e) => this.setState({ [key]: e.target.value }),
+      });
+    return React.createElement('div', null, [
+      React.createElement('div', { key: 'h', className: 'mb-3' }, 'With the saved settings of this connection, as seen by this node. A peek never acks: what it reads from a queue or a group goes back.'),
+      React.createElement('div', { key: 'o' }, row('Options', area('options', 3))),
+      React.createElement('div', { key: 'd' }, row('Event', area('data', 4))),
+      React.createElement('div', { key: 'b' }, row('', [
+        React.createElement('button', { key: 'p', type: 'button', className: 'btn btn-sm btn-success', disabled: this.state.running, onClick: () => this.call('_publish', { method: 'POST', body: this.state.data }) }, 'Publish'),
+        ' ',
+        React.createElement('button', { key: 'k', type: 'button', className: 'btn btn-sm btn-info', disabled: this.state.running, onClick: () => this.call('_peek', { method: 'GET' }) }, 'Peek'),
+      ])),
+      this.state.result ? React.createElement('div', { key: 'r' }, row('Result', React.createElement('pre', { style: { maxHeight: 400, overflow: 'auto' } }, this.state.result))) : null,
+    ]);
+  }
+}
+
 class EventBrokerConnectionsPage extends Component {
 
   formSchema = {
@@ -71,6 +130,10 @@ class EventBrokerConnectionsPage extends Component {
     'settings': {
       type: 'jsonobjectcode',
       props: { label: 'Settings' },
+    },
+    _tryout: {
+      type: ConnectionTryout,
+      props: {},
     },
     // shared
     'settings.default_topic': input('string', 'Default topic', { help: 'Used when a call names no topic' }),
@@ -224,7 +287,9 @@ class EventBrokerConnectionsPage extends Component {
     );
   };
 
-  formFlow = (state) => {
+  formFlow = (state) => this.kindFlow(state).concat(state && state.id ? ['>>>Try it', '_tryout'] : []);
+
+  kindFlow = (state) => {
     const head = ['_loc', 'id', 'name', 'description', '>>>Metadata and tags', 'tags', 'metadata', '<<<Connection', 'kind'];
     const tls = ['settings.tls.enabled', 'settings.tls.client_certs', 'settings.tls.trusted_certs', 'settings.tls.trust_all', 'settings.tls.hostname_verification'];
     switch (state.kind) {
@@ -361,9 +426,9 @@ class EventBrokerConnectionsPage extends Component {
         stayAfterSave: true,
         fetchItems: (paginationState) => this.fetchItems(),
         // the status is only shown, never saved
-        updateItem: (item) => this.client.update(_.omit(item, ['_status'])),
-        deleteItem: (item) => this.client.delete(_.omit(item, ['_status'])),
-        createItem: (item) => this.client.create(_.omit(item, ['_status'])),
+        updateItem: (item) => this.client.update(_.omit(item, ['_status', '_tryout'])),
+        deleteItem: (item) => this.client.delete(_.omit(item, ['_status', '_tryout'])),
+        createItem: (item) => this.client.create(_.omit(item, ['_status', '_tryout'])),
         navigateTo: (item) => {
           window.location = `/bo/dashboard/extensions/cloud-apim/event-brokers/connections/edit/${item.id}`
         },

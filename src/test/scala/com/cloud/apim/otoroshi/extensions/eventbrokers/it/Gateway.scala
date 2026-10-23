@@ -78,6 +78,7 @@ object Gateway {
         |    healthcheck.max-failures = 2
         |    retire-grace-period = 2s
         |  }
+        |  webhooks.lock-ttl = 3s
         |}
         |""".stripMargin)
       .resolve()
@@ -209,6 +210,19 @@ object Gateway {
   }
 
   def deleteConnection(id: String): WSResponse = await(admin(s"$connectionsPath/$id").delete())
+
+  val webhooksPath = "/apis/event-brokers.extensions.cloud-apim.com/v1/event-broker-webhooks"
+
+  /** creates a webhook, and waits until the extension has picked it up */
+  def createWebhook(webhook: JsObject): String = {
+    val id  = (webhook \ "id").asOpt[String].getOrElse(s"webhook_${UUID.randomUUID()}")
+    val res = await(admin(webhooksPath).post(Json.stringify(Json.obj("id" -> id, "name" -> id, "description" -> "") ++ webhook)))
+    if (res.status > 299) throw new RuntimeException(s"could not create the webhook: ${res.status} ${res.body}")
+    eventually(s"webhook $id in the extension state")(extension.states.webhook(id).isDefined)
+    id
+  }
+
+  def deleteWebhook(id: String): WSResponse = await(admin(s"$webhooksPath/$id").delete())
 
   /** what the admin api says of the connections of this node */
   def connectionStatus(id: String): WSResponse =

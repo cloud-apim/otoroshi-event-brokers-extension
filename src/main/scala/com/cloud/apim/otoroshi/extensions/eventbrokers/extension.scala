@@ -2,7 +2,7 @@ package otoroshi_plugins.com.cloud.apim.otoroshi.extensions.eventbrokers
 
 import org.apache.pekko.stream.scaladsl.StreamConverters
 import org.apache.pekko.util.ByteString
-import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings}
+import com.cloud.apim.otoroshi.extensions.eventbrokers.{ConnectionManager, ConnectionManagerSettings, ConnectionTryout, WebhookLocks, WebhookManager, WebhookManagerSettings}
 import com.cloud.apim.otoroshi.extensions.eventbrokers.entities._
 import otoroshi.env.Env
 import otoroshi.models._
@@ -19,6 +19,7 @@ import scala.concurrent.duration.DurationInt
 
 class EventBrokersExtensionDatastores(env: Env, extensionId: AdminExtensionId) {
   val eventBrokerConnectionDatastore: EventBrokerConnectionDatastore = new KvEventBrokerConnectionDatastore(extensionId, env.datastores.redis, env)
+  val eventBrokerWebhookDatastore: EventBrokerWebhookDatastore       = new KvEventBrokerWebhookDatastore(extensionId, env.datastores.redis, env)
 }
 
 class EventBrokersExtensionState {
@@ -28,6 +29,13 @@ class EventBrokersExtensionState {
   def allConnections(): Seq[EventBrokerConnection]          = _connections.values.toSeq
   def updateConnections(values: Seq[EventBrokerConnection]): Unit = {
     _connections.addAll(values.map(v => (v.id, v))).remAll(_connections.keySet.toSeq.diff(values.map(_.id)))
+  }
+
+  private val _webhooks = new UnboundedTrieMap[String, EventBrokerWebhook]()
+  def webhook(id: String): Option[EventBrokerWebhook] = _webhooks.get(id)
+  def allWebhooks(): Seq[EventBrokerWebhook]          = _webhooks.values.toSeq
+  def updateWebhooks(values: Seq[EventBrokerWebhook]): Unit = {
+    _webhooks.addAll(values.map(v => (v.id, v))).remAll(_webhooks.keySet.toSeq.diff(values.map(_.id)))
   }
 }
 
@@ -51,12 +59,19 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
   lazy val connections: ConnectionManager =
     new ConnectionManager(env, ConnectionManagerSettings.from(configuration), _.newClientInstance()(using env))
 
+  /** the webhooks this node delivers: in a cluster, one node at a time each, decided in a shared redis */
+  lazy val webhooks: WebhookManager = {
+    val settings = WebhookManagerSettings.from(configuration)
+    new WebhookManager(env, settings, connections, node => WebhookLocks(env, settings, node))
+  }
+
   override def start(): Unit = {
     logger.info("the 'Event Brokers Extension' is enabled !")
     connections.start()
   }
 
   override def stop(): Unit = {
+    webhooks.stop()
     connections.stop()
   }
 
@@ -69,6 +84,47 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
       false,
       (_, _, _, _) => {
         Results.Ok(Json.obj("node" -> nodeJson, "connections" -> JsArray(connections.statusesJson()))).vfuture
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "POST",
+      "/api/extensions/cloud-apim/event-brokers/connections/:id/_publish",
+      true,
+      (ctx, request, _, body) => {
+        given ExecutionContext = env.otoroshiExecutionContext
+        given Env              = env
+        ConnectionTryout.publish(connections, ctx.named("id").getOrElse(""), request, body)
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/connections/:id/_peek",
+      false,
+      (ctx, request, _, _) => {
+        given ExecutionContext = env.otoroshiExecutionContext
+        given Env              = env
+        ConnectionTryout.peek(connections, ctx.named("id").getOrElse(""), request)
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/webhooks/_status",
+      false,
+      (_, _, _, _) => {
+        given ExecutionContext = env.otoroshiExecutionContext
+        webhooks.statusesJson().map(all => Results.Ok(Json.obj("node" -> (nodeJson ++ webhooks.json), "webhooks" -> JsArray(all))))
+      }
+    ),
+    AdminExtensionAdminApiRoute(
+      "GET",
+      "/api/extensions/cloud-apim/event-brokers/webhooks/:id/_status",
+      false,
+      (ctx, _, _, _) => {
+        given ExecutionContext = env.otoroshiExecutionContext
+        ctx.named("id").map(webhooks.statusJson).getOrElse(Future.successful(None)).map {
+          case Some(status) => Results.Ok(status ++ Json.obj("node" -> (nodeJson ++ webhooks.json)))
+          case None         => Results.NotFound(Json.obj("error" -> "not_found", "error_description" -> "no such webhook delivered by this node (unknown, or disabled)"))
+        }
       }
     ),
     AdminExtensionAdminApiRoute(
@@ -101,6 +157,7 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
   }
 
   lazy val eventBrokerConnectionsPageCode = getResourceCode("cloudapim/extensions/event-brokers/EventBrokerConnectionsPage.js")
+  lazy val eventBrokerWebhooksPageCode    = getResourceCode("cloudapim/extensions/event-brokers/EventBrokerWebhooksPage.js")
   lazy val imgCode = getResourceCode("cloudapim/extensions/event-brokers/icon.svg")
 
   override def assets(): Seq[AdminExtensionAssetRoute] = Seq(
@@ -130,6 +187,8 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
              |
              |    ${eventBrokerConnectionsPageCode}
              |
+             |    ${eventBrokerWebhooksPageCode}
+             |
              |    return {
              |      id: extensionId,
              |      categories:[{
@@ -143,6 +202,14 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
              |            link: '/extensions/cloud-apim/event-brokers/connections',
              |            display: () => true,
              |            icon: () => 'fa-atom',
+             |          },
+             |          {
+             |            title: 'Event broker webhooks',
+             |            description: 'Events pushed to http endpoints',
+             |            absoluteImg: '/extensions/assets/cloud-apim/extensions/event-brokers/icon.svg',
+             |            link: '/extensions/cloud-apim/event-brokers/webhooks',
+             |            display: () => true,
+             |            icon: () => 'fa-paper-plane',
              |          }
              |        ]
              |      }],
@@ -154,6 +221,14 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
              |          link: '/extensions/cloud-apim/event-brokers/connections',
              |          display: () => true,
              |          icon: () => 'fa-atom',
+             |        },
+             |        {
+             |          title: 'Event broker webhooks',
+             |          description: 'Events pushed to http endpoints',
+             |          absoluteImg: '/extensions/assets/cloud-apim/extensions/event-brokers/icon.svg',
+             |          link: '/extensions/cloud-apim/event-brokers/webhooks',
+             |          display: () => true,
+             |          icon: () => 'fa-paper-plane',
              |        }
              |      ],
              |      sidebarItems: [
@@ -162,6 +237,12 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
              |          text: 'All your Event broker connections',
              |          path: 'extensions/cloud-apim/event-brokers/connections',
              |          icon: 'atom'
+             |        },
+             |        {
+             |          title: 'Event broker webhooks',
+             |          text: 'Events pushed to http endpoints',
+             |          path: 'extensions/cloud-apim/event-brokers/webhooks',
+             |          icon: 'paper-plane'
              |        }
              |      ],
              |      searchItems: [
@@ -172,9 +253,35 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
              |          env: React.createElement('span', { className: "fas fa-atom" }, null),
              |          label: 'Event brokers connections',
              |          value: 'eventbrokerconnections',
+             |        },
+             |        {
+             |          action: () => {
+             |            window.location.href = `/bo/dashboard/extensions/cloud-apim/event-brokers/webhooks`
+             |          },
+             |          env: React.createElement('span', { className: "fas fa-paper-plane" }, null),
+             |          label: 'Event brokers webhooks',
+             |          value: 'eventbrokerwebhooks',
              |        }
              |      ],
              |      routes: [
+             |        {
+             |          path: '/extensions/cloud-apim/event-brokers/webhooks/:taction/:titem',
+             |          component: (props) => {
+             |            return React.createElement(EventBrokerWebhooksPage, props, null)
+             |          }
+             |        },
+             |        {
+             |          path: '/extensions/cloud-apim/event-brokers/webhooks/:taction',
+             |          component: (props) => {
+             |            return React.createElement(EventBrokerWebhooksPage, props, null)
+             |          }
+             |        },
+             |        {
+             |          path: '/extensions/cloud-apim/event-brokers/webhooks',
+             |          component: (props) => {
+             |            return React.createElement(EventBrokerWebhooksPage, props, null)
+             |          }
+             |        },
              |        {
              |          path: '/extensions/cloud-apim/event-brokers/connections/:taction/:titem',
              |          component: (props) => {
@@ -207,9 +314,12 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
     given ev: Env              = env
     for {
       connections <- datastores.eventBrokerConnectionDatastore.findAllAndFillSecrets()
+      webhooks    <- datastores.eventBrokerWebhookDatastore.findAllAndFillSecrets()
     } yield {
       states.updateConnections(connections)
+      states.updateWebhooks(webhooks)
       this.connections.sync(connections)
+      this.webhooks.sync(webhooks)
       ()
     }
   }
@@ -217,6 +327,7 @@ class EventBrokersExtension(val env: Env) extends AdminExtension {
   override def entities(): Seq[AdminExtensionEntity[EntityLocationSupport]] = {
     Seq(
       AdminExtensionEntity(EventBrokerConnection.resource(env, datastores, states)),
+      AdminExtensionEntity(EventBrokerWebhook.resource(env, datastores, states)),
     )
   }
 }

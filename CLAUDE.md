@@ -54,6 +54,12 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
 - **tls.scala** - `TlsMaterial`: what the `tls` settings of a connection name in the Otoroshi certificate
   store (by id or dn), as key / trust managers, an `SSLContext`, pem, or files of the client's own
   (`TlsFiles`, deleted on close). Every client gets its tls from there
+- **webhooks.scala** - `WebhookManager` (fed with the enabled `EventBrokerWebhook`s by `syncStates`, one
+  `WebhookRunner` each) and `WebhookLocks`: a runner delivers while its node holds the webhook's lock
+  (always alone, in the shared redis in a cluster, never in a cluster without it). A runner subscribes
+  through a `ClientLease`, posts each event (`WebhookRequest`), retries with backoff, dead-letters or
+  alerts, then acks. **entities/webhooks.scala** holds the entity, read with `Fields`
+- **tryout.scala** - `ConnectionTryout`: the `_publish` and `_peek` admin routes of a connection
 - **events.scala** - `EventBrokerConnectionEvent` (each state change) and
   `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy

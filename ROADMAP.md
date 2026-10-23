@@ -63,9 +63,11 @@ Taken on 2026-10-22, not to be discussed again:
 
 ## Phase 3: features on top
 
-- [ ] Webhooks: events pushed to HTTP endpoints, with retries, coordinated between the nodes through a shared
-  Redis (Otoroshi's stateful clients API); required except on a single instance
-- [ ] Admin api and backoffice to try a connection: publish a test event, peek at what a topic or queue holds
+- [x] Webhooks: events pushed to HTTP endpoints (structured, binary or raw, signed), with retries, dead
+  letters and alerts, delivered by one node at a time, decided in a Redis the nodes share (Otoroshi's
+  stateful clients API), required except on a single instance; backoffice page and status api
+- [x] Admin api and backoffice to try a connection: publish a test event, peek at what a topic or queue holds
+  (never acking: what is peeked at stays where it was)
 - [ ] Data exporter: Otoroshi events (analytics, alerts, audit) exported to any connection
 - [ ] Workflow functions: publish and consume from Otoroshi workflows
 - [ ] Request-reply over the brokers that support it (reply-to, correlation id)
