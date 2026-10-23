@@ -65,6 +65,16 @@ object Brokers {
     container
   }
 
+  /** the default user of the image: artemis / artemis */
+  lazy val artemis: Container = {
+    val container = new Container("apache/artemis:2.55.0-alpine")
+    container.withExposedPorts(61616)
+    container.waitingFor(Wait.forLogMessage(".*AMQ221007.*", 1))
+    container.start()
+    container
+  }
+
   def redisUri: String     = s"redis://${redis.getHost}:${redis.getMappedPort(6379)}"
+  def artemisUrl: String   = s"tcp://${artemis.getHost}:${artemis.getMappedPort(61616)}"
   def mosquittoPort: Int   = mosquitto.getMappedPort(1883)
 }

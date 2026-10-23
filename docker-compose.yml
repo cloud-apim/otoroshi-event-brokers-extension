@@ -63,6 +63,16 @@ services:
     ports:
       - "1883:1883"
   ######################################################################################################################
+  artemis:
+    image: apache/artemis:2.55.0-alpine
+    environment:
+      ARTEMIS_USER: artemis
+      ARTEMIS_PASSWORD: artemis
+    ports:
+      # core (and every other protocol), and the console on http://localhost:8161
+      - "61616:61616"
+      - "8161:8161"
+  ######################################################################################################################
 volumes:
   kafka-volume:
   pulsar-volume:

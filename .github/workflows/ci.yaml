@@ -36,7 +36,7 @@ jobs:
       # pulling them inside the suites would count against their timeouts
       - name: pull the broker images
         run: |
-          for image in apache/kafka:3.8.0 rabbitmq:4.1-management-alpine apachepulsar/pulsar:4.0.5 redis:7.4-alpine eclipse-mosquitto:2.0.21; do
+          for image in apache/kafka:3.8.0 rabbitmq:4.1-management-alpine apachepulsar/pulsar:4.0.5 redis:7.4-alpine eclipse-mosquitto:2.0.21 apache/artemis:2.55.0-alpine; do
             docker pull -q "$image" &
           done
           wait

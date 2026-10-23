@@ -142,6 +142,21 @@ class CloudEventSuite extends munit.FunSuite {
     assertEquals(back.extension("redisid"), Some("1792663171364-0"))
   }
 
+  test("artemis: binary mode, every attribute in a cloudEvents_ property, partitionkey as the group id") {
+    val message = CloudEventBindings.toMessage(event, EventBrokerConnectionKind.Artemis, Map("address" -> "orders"))
+    assertEquals(message.headers.get("cloudEvents_id"), Some("e1"))
+    assertEquals(message.headers.get("cloudEvents_type"), Some("com.acme.order.created"))
+    // a property a jms selector can name: no content-type property, which is not a jms identifier
+    assertEquals(message.headers.get("cloudEvents_datacontenttype"), Some("application/json"))
+    assertEquals(message.headers.get("content-type"), None)
+    assertEquals(message.key, Some(ByteString("o-42")))
+    assertEquals(message.metadata, Map("address" -> "orders"))
+    assertEquals(roundTrip(EventBrokerConnectionKind.Artemis, Map.empty), event)
+    // what an amqp producer sent through artemis
+    val amqp    = message.copy(headers = message.headers.map((name, value) => name.replace("cloudEvents_", "cloudEvents:") -> value), metadata = Map.empty)
+    assertEquals(CloudEventBindings.fromMessage(amqp, EventBrokerConnectionKind.Artemis), event)
+  }
+
   test("redis and mqtt 3.1.1: structured mode, the whole event in the payload") {
     Seq(EventBrokerConnectionKind.Redis, EventBrokerConnectionKind.MQTT).foreach { kind =>
       val message = CloudEventBindings.toMessage(event, kind, headers = false)

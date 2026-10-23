@@ -103,7 +103,7 @@ object EventBrokerPluginConfig {
 object CallOptions {
 
   /** the options that name what to read or where to write: checked against `allowed_topics` */
-  val TopicOptions: Set[String] = Set("topic", "topics", "queue", "channel", "stream")
+  val TopicOptions: Set[String] = Set("topic", "topics", "queue", "channel", "stream", "address")
 
   def allows(config: EventBrokerPluginConfig, option: String): Boolean =
     config.allowedOverrides.contains("*") || config.allowedOverrides.contains(option)
@@ -200,7 +200,7 @@ object PluginUtils {
 
   /**
    * what the call asks to subscribe to:
-   *  - `topic`, `topics` (comma separated), `queue`, `channel`, `stream`: what to read (the connection's default without)
+   *  - `topic`, `topics` (comma separated), `queue`, `channel`, `stream`, `address`: what to read (the connection's default without)
    *  - `group` (or `group_id`, `subscription`): share the events with the other subscribers of the group
    *  - `from` (or `auto_offset_reset`): `latest` or `earliest`; `from_timestamp` (epoch millis); `offset_from`
    *  - `delivery`: `at-most-once` (the default) or `at-least-once`
@@ -208,7 +208,7 @@ object PluginUtils {
    */
   def subscriptionSpec(opts: JsObject): Either[String, SubscriptionSpec] = {
     def str(key: String): Option[String] = opts.select(key).asOpt[String].map(_.trim).filter(_.nonEmpty)
-    val topics   = (str("topics").toSeq.flatMap(_.split(",")) ++ str("topic") ++ str("queue") ++ str("channel") ++ str("stream")).map(_.trim).filter(_.nonEmpty).distinct
+    val topics   = (str("topics").toSeq.flatMap(_.split(",")) ++ str("topic") ++ str("queue") ++ str("channel") ++ str("stream") ++ str("address")).map(_.trim).filter(_.nonEmpty).distinct
     val group    = str("group").orElse(str("group_id")).orElse(str("subscription"))
     val delivery = str("delivery") match {
       case None        => Right(DeliveryMode.AtMostOnce)
