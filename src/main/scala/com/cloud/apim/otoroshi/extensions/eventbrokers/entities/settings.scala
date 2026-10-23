@@ -414,12 +414,35 @@ object PulsarSettings {
 // redis
 // -------------------------------------------------------------------------------------------------
 
+/** what only a connection in `streams` mode uses */
+final case class RedisStreamsSettings(
+    defaultStream: Option[String] = None,
+    /** trims the stream on each XADD, to about that many entries (exactly, with `exact_trimming`). none: no limit */
+    maxLength: Option[Long] = None,
+    exactTrimming: Boolean = false,
+    /** the field of an entry holding the data: the other fields are its headers */
+    dataField: String = "data",
+    /** an entry left unacked that long by a consumer of a group goes to another one. 0: never */
+    claimMinIdleMs: Long = 60000L
+) {
+  def json: JsObject = Json.obj(
+    "default_stream"    -> defaultStream,
+    "max_length"        -> maxLength,
+    "exact_trimming"    -> exactTrimming,
+    "data_field"        -> dataField,
+    "claim_min_idle_ms" -> claimMinIdleMs
+  )
+}
+
 final case class RedisSettings(
     /** redis://, or rediss:// for tls */
     uri: String,
     username: Option[String] = None,
     password: Option[String] = None,
+    /** pubsub (channels, fire and forget) or streams (an append-only log, with groups and acks) */
+    mode: String = "pubsub",
     defaultChannel: Option[String] = None,
+    streams: RedisStreamsSettings = RedisStreamsSettings(),
     startTls: Boolean = false,
     verifyPeer: Boolean = true,
     ioThreadPoolSize: Option[Int] = None,
@@ -428,11 +451,15 @@ final case class RedisSettings(
 
   def kind: EventBrokerConnectionKind = EventBrokerConnectionKind.Redis
 
+  def isStreams: Boolean = mode == "streams"
+
   def json: JsObject = Json.obj(
     "uri"                          -> uri,
     "username"                     -> username,
     "password"                     -> password,
+    "mode"                         -> mode,
     "default_channel"              -> defaultChannel,
+    "streams"                      -> streams.json,
     "tls"                          -> Json.obj("start_tls" -> startTls, "verify_peer" -> verifyPeer),
     "io_thread_pool_size"          -> ioThreadPoolSize,
     "computation_thread_pool_size" -> computationThreadPoolSize
@@ -444,11 +471,29 @@ object RedisSettings {
     val uri                = f.requiredString("uri").getOrElse("")
     f.check("uri", uri.isEmpty || Try(RedisURI.create(uri)).isSuccess, "is not a redis uri")
     val (startTls, verifyPeer) = f.obj("tls")(t => (t.get[Boolean]("start_tls", false), t.get[Boolean]("verify_peer", true)))
+    val streams            = f.obj("streams") { s =>
+      // 0: no limit, what an emptied form field sends
+      val maxLength = s.opt[Long]("max_length")
+      if (maxLength.exists(_ < 0)) s.error("max_length", "must not be negative")
+      val claim     = s.get[Long]("claim_min_idle_ms", 60000L)
+      if (claim < 0) s.error("claim_min_idle_ms", "must not be negative")
+      val field     = s.get[String]("data_field", "data")
+      if (field.isEmpty) s.error("data_field", "must not be empty")
+      RedisStreamsSettings(
+        defaultStream = s.optString("default_stream"),
+        maxLength = maxLength.filter(_ > 0),
+        exactTrimming = s.get[Boolean]("exact_trimming", false),
+        dataField = field,
+        claimMinIdleMs = claim
+      )
+    }
     RedisSettings(
       uri = uri,
       username = f.optString("username"),
       password = f.optString("password"),
+      mode = f.oneOf("mode", "pubsub", Seq("pubsub", "streams")),
       defaultChannel = f.optString("default_channel"),
+      streams = streams,
       startTls = startTls,
       verifyPeer = verifyPeer,
       ioThreadPoolSize = f.opt[Int]("io_thread_pool_size"),

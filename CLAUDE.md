@@ -53,8 +53,9 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
   `EventBrokerConnectionUnavailableAlert` (one per outage)
 - **cloudevents.scala** - `CloudEvent` (structured json, batches, the http binary mode, the legacy
   format) and `CloudEventBindings`: how an event becomes a `BrokerMessage` on each kind (binary mode
-  with `ce_` headers on kafka and pulsar, `cloudEvents:` application properties on rabbitmq, structured
-  payload on redis and mqtt) and back, a message without cloudevents attributes being synthesized
+  with `ce_` headers on kafka, pulsar and redis streams (fields of the entry), `cloudEvents:` application
+  properties on rabbitmq, user properties on mqtt 5, structured payload on redis pub/sub and mqtt 3.1.1)
+  and back, a message without cloudevents attributes being synthesized
   (position as id, `/<kind>/<topic>` as source), broker metadata added as `<kind><name>` extensions
 - **api.scala** - `BrokerMessage`, a message as a broker carries it (key, data, headers, metadata:
   routing hints going out, what the broker says coming in), and the `EventBrokerClient` contract:
@@ -70,7 +71,8 @@ Sources live in `src/main/scala/com/cloud/apim/otoroshi/extensions/eventbrokers/
     event is handed over (`PluginUtils.handOver`)
   - `capabilities` (acks, groups, replay, keys, headers): `PluginUtils.subscribe` refuses a spec the
     broker cannot serve. Keep them and the readme's table in sync
-- **clients/** - one `EventBrokerClient` per broker kind
+- **clients/** - one `EventBrokerClient` per broker kind; redis has two, pub/sub (redis.scala) and
+  streams (redisstreams.scala), picked by the `mode` of the connection
 - **plugins/** - `HttpEventsIngester`, `HttpEventsConsumer` (http.scala), `SseEventConsumer` (sse.scala),
   `IngesterConsumerWebsocket` (ws.scala); events.scala reads requests into events (`Ingest`), writes
   them (`Output`, `OutputFormat`: cloudevents or raw) and makes the SSE ids (`SseIds`: kafka positions
@@ -100,8 +102,9 @@ in `com.cloud.apim.otoroshi.extensions.eventbrokers...`.
   through the admin API and calls the routes over HTTP (pekko-http, one TCP connection per call, so
   ending a stream hangs up on the gateway like a real client would). `BrokerSuite` skips the suite
   when no docker daemon is reachable.
-- Pub/sub brokers (Redis, MQTT, Pulsar from latest) only deliver once the subscription is in place and
-  the gateway gives no signal for it: use `keepPublishing` + `assertConsecutive` rather than sleeps.
+- Pub/sub brokers (Redis pub/sub, MQTT, Pulsar from latest) only deliver once the subscription is in
+  place and the gateway gives no signal for it: use `keepPublishing` + `assertConsecutive` rather than
+  sleeps. Where the broker keeps what it got (Kafka, Redis streams), publish first and read `from=earliest`.
 - **Tests named `.fail` pin a known defect**: they pass while it is there and fail once it is fixed.
   When you fix one, remove the marker (and its comment). Check a `.fail` test fails for the reason its
   comment gives, not because of the harness.

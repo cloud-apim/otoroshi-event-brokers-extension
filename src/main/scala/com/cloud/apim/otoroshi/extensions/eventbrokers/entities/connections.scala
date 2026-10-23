@@ -62,7 +62,7 @@ case class EventBrokerConnection(
     case Left(errors)               => throw new InvalidConnectionSettings(errors)
     case Right(s: KafkaSettings)    => new KafkaBrokerClient(this, s, env)
     case Right(s: PulsarSettings)   => new PulsarBrokerClient(this, s)
-    case Right(s: RedisSettings)    => new RedisBrokerClient(this, s)
+    case Right(s: RedisSettings)    => if (s.isStreams) new RedisStreamsBrokerClient(this, s) else new RedisBrokerClient(this, s)
     case Right(s: MqttSettings)     => new MQTTBrokerClient(this, s)
     case Right(s: RabbitMQSettings) => new RabbitMqBrokerClient(this, s)
   }

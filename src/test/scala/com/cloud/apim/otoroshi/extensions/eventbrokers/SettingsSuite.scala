@@ -119,6 +119,21 @@ class SettingsSuite extends munit.FunSuite {
     assertEquals(MqttSettings(host = "m").version, 5)
   }
 
+  test("redis streams") {
+    val streams = Json.obj("default_stream" -> "orders", "max_length" -> 1000, "exact_trimming" -> true, "data_field" -> "payload", "claim_min_idle_ms" -> 5000)
+    assertEquals(
+      read(Redis, Json.obj("uri" -> "redis://r", "mode" -> "streams", "streams" -> streams)),
+      Right(RedisSettings(uri = "redis://r", mode = "streams", streams = RedisStreamsSettings(Some("orders"), Some(1000L), true, "payload", 5000L)))
+    )
+    assertEquals(RedisSettings(uri = "redis://r").isStreams, false)
+    assertError(Redis, Json.obj("uri" -> "redis://r", "mode" -> "list"), "mode: must be one of pubsub, streams")
+    assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("max_length" -> -1)), "streams.max_length: must not be negative")
+    assertEquals(read(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("max_length" -> 0))).map(_.asInstanceOf[RedisSettings].streams.maxLength), Right(None))
+    assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("claim_min_idle_ms" -> -1)), "streams.claim_min_idle_ms: must not be negative")
+    assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("data_field" -> "")), "streams.data_field: must not be empty")
+    assertError(Redis, Json.obj("uri" -> "redis://r", "streams" -> Json.obj("maxlen" -> 10)), "streams.maxlen: unknown field")
+  }
+
   test("values that come from a vault are only checked once resolved") {
     assert(read(Kafka, Json.obj("bootstrap_servers" -> Json.arr("${vault://local/kafka/servers}"))).isRight)
     assert(read(Redis, Json.obj("uri" -> "${vault://local/redis/uri}")).isRight)

@@ -213,7 +213,8 @@ object CloudEvent {
  *    in the amqp content-type
  *  - mqtt 5: binary mode, the attributes as user properties (no prefix, as the mqtt binding says), the
  *    content type as the content type of the message
- *  - redis and mqtt 3.1.1, which carry no headers: structured mode, the whole event as json
+ *  - redis streams: binary mode, the attributes in `ce_` fields of the entry, next to its data field
+ *  - redis pub/sub and mqtt 3.1.1, which carry no headers: structured mode, the whole event as json
  *
  * A message published without cloudevents (by another producer) is still read as an event: its id is
  * its position when the broker has one, its source `/<kind>/<topic>`, its type `MessageType`. Every
@@ -223,12 +224,13 @@ object CloudEventBindings {
 
   import EventBrokerConnectionKind.*
 
-  /** `headers`: whether the client can carry headers (mqtt 5 can, 3.1.1 cannot) */
+  /** `headers`: whether the client can carry headers (mqtt 5 and redis streams can, mqtt 3.1.1 and redis pub/sub cannot) */
   def toMessage(event: CloudEvent, kind: EventBrokerConnectionKind, routing: Map[String, String] = Map.empty, headers: Boolean = true): BrokerMessage =
     kind match {
       case Kafka | Pulsar        => binary(event, "ce_", routing).copy(key = event.extension("partitionkey").map(ByteString(_)))
       case RabbitMQ              => withContentTypeProperty(binary(event, "cloudEvents:", routing), event)
       case MQTT if headers       => withContentTypeProperty(binary(event, "", routing), event)
+      case Redis if headers      => binary(event, "ce_", routing)
       case Redis | MQTT          => BrokerMessage(data = ByteString(Json.stringify(event.json)), metadata = routing)
     }
 
@@ -253,12 +255,11 @@ object CloudEventBindings {
 
   def fromMessage(message: BrokerMessage, kind: EventBrokerConnectionKind): CloudEvent = {
     val event = kind match {
-      case Kafka | Pulsar => fromHeaders(message, "ce_", message.headers.get("content-type"))
-      case RabbitMQ       =>
+      case Kafka | Pulsar | Redis => fromHeaders(message, "ce_", message.headers.get("content-type"))
+      case RabbitMQ               =>
         fromHeaders(message, "cloudEvents:", message.metadata.get("content_type"))
           .orElse(fromHeaders(message, "cloudEvents_", message.metadata.get("content_type")))
-      case MQTT           => fromHeaders(message, "", message.metadata.get("content_type"))
-      case Redis          => None
+      case MQTT                   => fromHeaders(message, "", message.metadata.get("content_type"))
     }
     val withMetadata = (e: CloudEvent) => e.copy(extensions = brokerExtensions(message, kind) ++ e.extensions)
     withMetadata(event.orElse(structured(message, kind)).getOrElse(synthesized(message, kind)))
@@ -303,19 +304,22 @@ object CloudEventBindings {
   private def topicOf(message: BrokerMessage, kind: EventBrokerConnectionKind): String = kind match {
     case Kafka | Pulsar | MQTT => message.metadata.getOrElse("topic", "")
     case RabbitMQ              => message.metadata.get("routing_key").filter(_.nonEmpty).orElse(message.metadata.get("exchange")).getOrElse("")
-    case Redis                 => message.metadata.getOrElse("channel", "")
+    case Redis                 => message.metadata.get("stream").orElse(message.metadata.get("channel")).getOrElse("")
   }
 
   private def synthesized(message: BrokerMessage, kind: EventBrokerConnectionKind): CloudEvent = {
     val id          = kind match {
       case Kafka  => s"${message.metadata.getOrElse("topic", "")}-${message.metadata.getOrElse("partition", "")}-${message.metadata.getOrElse("offset", "")}"
       case Pulsar => message.metadata.getOrElse("message_id", UUID.randomUUID().toString)
+      case Redis if message.metadata.contains("stream") => s"${message.metadata.getOrElse("stream", "")}-${message.metadata.getOrElse("id", "")}"
       case _      => message.metadata.get("message_id").getOrElse(UUID.randomUUID().toString)
     }
     val millis      = kind match {
       case Kafka    => message.metadata.get("timestamp")
       case Pulsar   => message.metadata.get("publish_time")
       case RabbitMQ => message.metadata.get("timestamp")
+      // the id of a stream entry starts with the time it was added
+      case Redis    => message.metadata.get("id").map(_.takeWhile(_ != '-'))
       case _        => None
     }
     val declared    = kind match {

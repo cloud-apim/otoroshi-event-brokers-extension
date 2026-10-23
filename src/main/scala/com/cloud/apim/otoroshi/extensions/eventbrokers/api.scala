@@ -146,8 +146,11 @@ enum StartFrom {
   case Timestamp(epochMillis: Long)
   /** from that offset, on every partition (or the one asked for) */
   case Offset(offset: Long)
-  /** right after these positions (`topic:partition` -> offset), what a client resuming gives back */
-  case Positions(positions: Map[String, Long])
+  /**
+   * right after these positions, what a client resuming gives back. what a position is depends on the
+   * broker: `topic:partition` -> offset on kafka, stream -> entry id on redis streams
+   */
+  case Positions(positions: Map[String, String])
 }
 
 /** what to subscribe to. topics are topics, queues or channels, as the broker calls them */

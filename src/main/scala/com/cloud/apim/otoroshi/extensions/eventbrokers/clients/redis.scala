@@ -20,13 +20,10 @@ import scala.jdk.FutureConverters.*
 import scala.util.Try
 import scala.util.control.NonFatal
 
-/**
- * Redis pub/sub: one connection to publish (and to check the server), and one connection of its own
- * per subscription, closed with it. Names with glob characters (`*`, `?`, `[`) are patterns.
- */
-class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettings) extends EventBrokerClient {
+/** what both modes share: the uri, the client and its resources */
+abstract class RedisClientSupport(settings: RedisSettings) {
 
-  private def redisUri: RedisURI = {
+  protected def redisUri: RedisURI = {
     val uri = RedisURI.create(settings.uri)
     uri.setStartTls(settings.startTls)
     uri.setVerifyPeer(settings.verifyPeer)
@@ -47,11 +44,35 @@ class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettin
       .applyOnWithOpt(settings.computationThreadPoolSize)((b, size) => b.computationThreadPoolSize(size))
       .build()
 
-  private val resourcesRef  = new AtomicReference[Option[ClientResources]](None)
-  private val clientRef     = new AtomicReference[Option[RedisClient]](None)
-  private val connectionRef = new AtomicReference[Option[StatefulRedisPubSubConnection[String, ByteString]]](None)
+  private val resourcesRef = new AtomicReference[Option[ClientResources]](None)
+  private val clientRef    = new AtomicReference[Option[RedisClient]](None)
 
-  private def client: RedisClient = clientRef.get().getOrElse(throw new IllegalStateException("the redis client is not started"))
+  protected def client: RedisClient = clientRef.get().getOrElse(throw new IllegalStateException("the redis client is not started"))
+
+  /** blocking: connects nothing, the connections are opened from it */
+  protected def startClient(): RedisClient = {
+    val resources = buildResources()
+    resourcesRef.set(Some(resources))
+    val client    = RedisClient.create(resources, redisUri)
+    client.setOptions(ClientOptions.builder().socketOptions(SocketOptions.builder().connectTimeout(java.time.Duration.ofSeconds(10)).build()).build())
+    clientRef.set(Some(client))
+    client
+  }
+
+  /** blocking: closes every connection opened from the client */
+  protected def shutdownClient(): Unit = {
+    clientRef.getAndSet(None).foreach(c => Try(c.shutdown(java.time.Duration.ZERO, java.time.Duration.ofSeconds(2))))
+    resourcesRef.getAndSet(None).foreach(r => Try(r.shutdown(0, 2, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS)))
+  }
+}
+
+/**
+ * Redis pub/sub: one connection to publish (and to check the server), and one connection of its own
+ * per subscription, closed with it. Names with glob characters (`*`, `?`, `[`) are patterns.
+ */
+class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettings) extends RedisClientSupport(settings) with EventBrokerClient {
+
+  private val connectionRef = new AtomicReference[Option[StatefulRedisPubSubConnection[String, ByteString]]](None)
 
   private def connection: StatefulRedisPubSubConnection[String, ByteString] =
     connectionRef.get().getOrElse(throw new IllegalStateException("the redis client is not started"))
@@ -59,12 +80,7 @@ class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettin
   override val capabilities: BrokerCapabilities = BrokerCapabilities(acks = false, groups = false, replay = false, keys = false, headers = false)
 
   override def start()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
-    val resources = buildResources()
-    resourcesRef.set(Some(resources))
-    val client    = RedisClient.create(resources, redisUri)
-    client.setOptions(ClientOptions.builder().socketOptions(SocketOptions.builder().connectTimeout(java.time.Duration.ofSeconds(10)).build()).build())
-    clientRef.set(Some(client))
-    connectionRef.set(Some(client.connectPubSub(new ByteStringRedisCodec())))
+    connectionRef.set(Some(startClient().connectPubSub(new ByteStringRedisCodec())))
   }
 
   override def healthcheck()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
@@ -74,8 +90,7 @@ class RedisBrokerClient(val config: EventBrokerConnection, settings: RedisSettin
 
   def close()(using env: Env, ec: ExecutionContext): Future[Unit] = Future {
     connectionRef.getAndSet(None).foreach(c => Try(c.close()))
-    clientRef.getAndSet(None).foreach(c => Try(c.shutdown(java.time.Duration.ZERO, java.time.Duration.ofSeconds(2))))
-    resourcesRef.getAndSet(None).foreach(r => Try(r.shutdown(0, 2, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS)))
+    shutdownClient()
   }
 
   private def noChannel = new IllegalArgumentException("no channel: none in the call, and the connection has no default_channel")
