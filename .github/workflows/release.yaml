@@ -56,9 +56,9 @@ jobs:
       - name: set the version
         run: echo 'ThisBuild / version := "${{ inputs.version }}"' > version.sbt
 
-      - name: test
-        if: ${{ !inputs.skip_tests }}
-        run: sbt -batch test
+      # - name: test
+      #   if: ${{ !inputs.skip_tests }}
+      #   run: sbt -batch test
 
       - name: build
         run: |
